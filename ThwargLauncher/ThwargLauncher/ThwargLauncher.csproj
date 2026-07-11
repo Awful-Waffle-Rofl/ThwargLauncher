@@ -66,8 +66,8 @@
     <Reference Include="Newtonsoft.Json, Version=13.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed, processorArchitecture=MSIL">
       <HintPath>..\packages\Newtonsoft.Json.13.0.3\lib\net45\Newtonsoft.Json.dll</HintPath>
     </Reference>
-    <Reference Include="RestSharp, Version=105.2.3.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\RestSharp.105.2.3\lib\net45\RestSharp.dll</HintPath>
+    <Reference Include="RestSharp, Version=106.12.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\RestSharp.106.12.0\lib\net452\RestSharp.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Configuration" />
@@ -130,6 +130,8 @@
     <Compile Include="AccountManagement\Subscription.cs" />
     <Compile Include="AccountManagement\UserAcctViewModel.cs" />
     <Compile Include="AppCoordinator.cs" />
+    <Compile Include="CommandLine\ConsoleManager.cs" />
+    <Compile Include="CommandLine\HeadlessLauncher.cs" />
     <Compile Include="AppSettings\JSON.cs" />
     <Compile Include="AppSettings\WpfWindowPlacementSetting.cs" />
     <Compile Include="CharacterSetting.cs" />
