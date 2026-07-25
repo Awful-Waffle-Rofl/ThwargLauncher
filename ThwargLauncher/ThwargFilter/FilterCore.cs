@@ -17,6 +17,8 @@ namespace ThwargFilter
         readonly FastQuit fastQuit = new FastQuit();
         readonly LoginCompleteMessageQueueManager loginCompleteMessageQueueManager = new LoginCompleteMessageQueueManager();
         readonly AfterLoginCompleteMessageQueueManager afterLoginCompleteMessageQueueManager = new AfterLoginCompleteMessageQueueManager();
+        readonly ChatObserver chatObserver = new ChatObserver();
+        readonly GameStateDumper gameStateDumper = new GameStateDumper();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -47,12 +49,18 @@ namespace ThwargFilter
             loginNextCharacterManager = new LoginNextCharacterManager(loginCharacterTools);
             thwargInventory = new ThwargInventory();
             ThwargFilterCommandParser.Inventory = thwargInventory;
+            ThwargFilterCommandParser.GameState = gameStateDumper;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);
             WindowMessage += new EventHandler<WindowMessageEventArgs>(FilterCore_WindowMessage);
 
             CommandLineText += new EventHandler<ChatParserInterceptEventArgs>(FilterCore_CommandLineText);
+
+            // Chat window capture for the test observation channel. Decal plugin output
+            // (UtilityBelt, VirindiTank) is drawn client side and never appears as a
+            // server message, so ServerDispatch alone cannot see it.
+            CoreManager.Current.ChatBoxMessage += new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
         }
 
         public static DateTime GetLastServerDispatchUtc()
@@ -79,6 +87,8 @@ namespace ThwargFilter
             WindowMessage -= new EventHandler<WindowMessageEventArgs>(FilterCore_WindowMessage);
 
             CommandLineText -= new EventHandler<ChatParserInterceptEventArgs>(FilterCore_CommandLineText);
+
+            CoreManager.Current.ChatBoxMessage -= new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
 
             log.WriteInfo("FilterCore-Shutdown");
         }
@@ -109,6 +119,19 @@ namespace ThwargFilter
                 defaultFirstCharacterManager.FilterCore_ServerDispatch(sender, e);
                 chooseCharacterManager.FilterCore_ServerDispatch(sender, e);
                 loginNextCharacterManager.FilterCore_ServerDispatch(sender, e);
+
+                // Observation only, and last, so it cannot affect the login path above.
+                // ChatObserver swallows its own exceptions and never rethrows.
+                chatObserver.FilterCore_ServerDispatch(sender, e);
+            }
+            catch (Exception ex) { Debug.LogException(ex); }
+        }
+
+        void Current_ChatBoxMessage(object sender, ChatTextInterceptEventArgs e)
+        {
+            try
+            {
+                chatObserver.Current_ChatBoxMessage(sender, e);
             }
             catch (Exception ex) { Debug.LogException(ex); }
         }
