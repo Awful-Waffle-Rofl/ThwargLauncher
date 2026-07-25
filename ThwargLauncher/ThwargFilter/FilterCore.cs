@@ -17,6 +17,8 @@ namespace ThwargFilter
         readonly FastQuit fastQuit = new FastQuit();
         readonly LoginCompleteMessageQueueManager loginCompleteMessageQueueManager = new LoginCompleteMessageQueueManager();
         readonly AfterLoginCompleteMessageQueueManager afterLoginCompleteMessageQueueManager = new AfterLoginCompleteMessageQueueManager();
+        readonly ChatObserver chatObserver = new ChatObserver();
+        readonly GameStateDumper gameStateDumper = new GameStateDumper();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -27,6 +29,8 @@ namespace ThwargFilter
 
         private DateTime _lastServerDispatchUtc = DateTime.MinValue;
         private static FilterCore theFilterCore = null;
+        // Only unsubscribe chat box capture in Shutdown if subscribing actually succeeded.
+        private bool _chatBoxMessageSubscribed;
 
 
         private string PluginName { get { return FileLocations.FilterName; } }
@@ -47,12 +51,29 @@ namespace ThwargFilter
             loginNextCharacterManager = new LoginNextCharacterManager(loginCharacterTools);
             thwargInventory = new ThwargInventory();
             ThwargFilterCommandParser.Inventory = thwargInventory;
+            ThwargFilterCommandParser.GameState = gameStateDumper;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);
             WindowMessage += new EventHandler<WindowMessageEventArgs>(FilterCore_WindowMessage);
 
             CommandLineText += new EventHandler<ChatParserInterceptEventArgs>(FilterCore_CommandLineText);
+
+            // Chat window capture for the test observation channel. Decal plugin output
+            // (UtilityBelt, VirindiTank) is drawn client side and never appears as a
+            // server message, so ServerDispatch alone cannot see it.
+            // Guarded on its own: this is an optional observation feature, and it must
+            // never be able to abort Startup and take the core filter (heartbeat,
+            // channel, auto-login) down with it.
+            try
+            {
+                CoreManager.Current.ChatBoxMessage += new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+                _chatBoxMessageSubscribed = true;
+            }
+            catch (Exception ex)
+            {
+                log.WriteError("Failed to subscribe chat box capture, continuing without it: {0}", ex);
+            }
         }
 
         public static DateTime GetLastServerDispatchUtc()
@@ -79,6 +100,21 @@ namespace ThwargFilter
             WindowMessage -= new EventHandler<WindowMessageEventArgs>(FilterCore_WindowMessage);
 
             CommandLineText -= new EventHandler<ChatParserInterceptEventArgs>(FilterCore_CommandLineText);
+
+            // Mirror of the guarded subscribe in Startup: only unsubscribe if we managed
+            // to subscribe, and never let a failure here abort Shutdown.
+            if (_chatBoxMessageSubscribed)
+            {
+                try
+                {
+                    CoreManager.Current.ChatBoxMessage -= new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+                    _chatBoxMessageSubscribed = false;
+                }
+                catch (Exception ex)
+                {
+                    log.WriteError("Failed to unsubscribe chat box capture: {0}", ex);
+                }
+            }
 
             log.WriteInfo("FilterCore-Shutdown");
         }
@@ -109,6 +145,19 @@ namespace ThwargFilter
                 defaultFirstCharacterManager.FilterCore_ServerDispatch(sender, e);
                 chooseCharacterManager.FilterCore_ServerDispatch(sender, e);
                 loginNextCharacterManager.FilterCore_ServerDispatch(sender, e);
+
+                // Observation only, and last, so it cannot affect the login path above.
+                // ChatObserver swallows its own exceptions and never rethrows.
+                chatObserver.FilterCore_ServerDispatch(sender, e);
+            }
+            catch (Exception ex) { Debug.LogException(ex); }
+        }
+
+        void Current_ChatBoxMessage(object sender, ChatTextInterceptEventArgs e)
+        {
+            try
+            {
+                chatObserver.Current_ChatBoxMessage(sender, e);
             }
             catch (Exception ex) { Debug.LogException(ex); }
         }

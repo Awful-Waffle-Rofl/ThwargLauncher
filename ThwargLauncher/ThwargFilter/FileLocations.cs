@@ -96,6 +96,36 @@ namespace ThwargFilter
             }
             return processId;
         }
+        /// <summary>
+        /// Chat capture file for the test observation channel.
+        /// One JSON object per line, appended by ChatLogWriter, read by an external harness.
+        /// </summary>
+        public static string GetChatLogFilepath()
+        {
+            return GetRunningFilepath(string.Format("chatlog_{0}.jsonl", CurrentProcessId));
+        }
+        /// <summary>
+        /// Previous chat capture file, overwritten each time the live one is rotated.
+        /// </summary>
+        public static string GetChatLogRotatedFilepath()
+        {
+            return GetRunningFilepath(string.Format("chatlog_{0}.1.jsonl", CurrentProcessId));
+        }
+        /// <summary>
+        /// Game state snapshot written by the "dumpstate" verb (JSON, full overwrite).
+        /// </summary>
+        public static string GetGameStateFilepath()
+        {
+            return GetRunningFilepath(string.Format("gamestate_{0}.txt", CurrentProcessId));
+        }
+        private static int CurrentProcessId
+        {
+            get { return System.Diagnostics.Process.GetCurrentProcess().Id; }
+        }
+        private static string GetRunningFilepath(string filename)
+        {
+            return System.IO.Path.Combine(FileLocations.GetRunningFolder(), filename);
+        }
         public static string GetGameToLauncherFilepath(int processId)
         {
             string filename = string.Format("gameToLauncher_{0}.txt", processId);

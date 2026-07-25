@@ -66,8 +66,11 @@ namespace ThwargFilter
         private const string CMD_LockWindowPosition2 = "lwp";
         private const string CMD_UnlockWindowPosition = "unlockwindowposition";
         private const string CMD_UnlockWindowPosition2 = "ulwp";
+        private const string CMD_DumpState = "dumpstate";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
+        private GameStateDumper _gameStateDumper;
+        public GameStateDumper GameState { set { _gameStateDumper = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -111,6 +114,7 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_LockWindowPosition2, LockWindowPositionCommandHandler, null);
             cmdHandlers.Add(CMD_UnlockWindowPosition, UnlockWindowPositionCommandHandler, "Save and unlock window positions ('/tf ulwp')");
             cmdHandlers.Add(CMD_UnlockWindowPosition2, UnlockWindowPositionCommandHandler, null);
+            cmdHandlers.Add(CMD_DumpState, DumpStateCommandHandler, "Snapshot game state to gamestate_<pid>.txt ('/tf dumpstate')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -124,6 +128,14 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, CMD_LeaveTeam2, out commandString))
             {
                 LeaveTeamCommandHandler(commandString);
+            }
+            // Handled here rather than dispatched to the game's chat parser because this
+            // runs on the heartbeat timer or FileSystemWatcher thread, not the game thread.
+            // Both spellings are accepted so a harness can send either one.
+            else if (IsCommandPrefix(command, CMD_DumpState, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_DumpState, out commandString))
+            {
+                DumpStateCommandHandler(commandString);
             }
             else
             {
@@ -221,6 +233,15 @@ namespace ThwargFilter
         private void InventoryCommandHandler(string command)
         {
             _thwargInventory.HandleInventoryCommand();
+        }
+        private void DumpStateCommandHandler(string command)
+        {
+            if (_gameStateDumper == null)
+            {
+                log.WriteError("dumpstate requested but no GameStateDumper is wired up");
+                return;
+            }
+            _gameStateDumper.RequestDump();
         }
         private void KillClientCommandHandler(string command)
         {
