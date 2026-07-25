@@ -163,7 +163,7 @@ namespace ThwargFilter
 
         private void AppraiseByName(string target)
         {
-            List<AppraiseCandidate> candidates = CollectCandidates(target);
+            List<TargetCandidate> candidates = TargetResolver.Collect(target);
             if (candidates == null)
             {
                 log.WriteError("appraise '{0}': could not read the world object list", target);
@@ -172,7 +172,7 @@ namespace ThwargFilter
             }
             if (candidates.Count == 1)
             {
-                AppraiseCandidate match = candidates[0];
+                TargetCandidate match = candidates[0];
                 if (SendRequestId(match.Id))
                 {
                     log.WriteInfo("appraise '{0}': matched {1}", target, match.Describe());
@@ -199,107 +199,9 @@ namespace ThwargFilter
                     candidates.Count);
                 WriteResult(target, OUTCOME_Ambiguous, 0, null, candidates.Count);
             }
-            LogCandidates(candidates);
+            TargetResolver.LogCandidates("appraise", candidates, MAX_LOGGED_CANDIDATES);
         }
 
-        private void LogCandidates(List<AppraiseCandidate> candidates)
-        {
-            int shown = 0;
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                if (shown >= MAX_LOGGED_CANDIDATES)
-                {
-                    log.WriteInfo("appraise: ...and {0} more", candidates.Count - shown);
-                    break;
-                }
-                log.WriteInfo("appraise candidate: {0}", candidates[i].Describe());
-                shown++;
-            }
-        }
-
-        /// <summary>
-        /// Case insensitive substring match over landscape objects and players, sorted
-        /// nearest first. Returns null only if the world object list cannot be read at all.
-        /// </summary>
-        private List<AppraiseCandidate> CollectCandidates(string target)
-        {
-            List<AppraiseCandidate> found = new List<AppraiseCandidate>();
-            Dictionary<int, bool> seen = new Dictionary<int, bool>();
-            int playerId = 0;
-            WorldFilter worldFilter = null;
-            try
-            {
-                worldFilter = CoreManager.Current.WorldFilter;
-                if (worldFilter == null) { return null; }
-                playerId = CoreManager.Current.CharacterFilter.Id;
-            }
-            catch (Exception exc)
-            {
-                log.WriteError("appraise: cannot reach the world filter: {0}", exc);
-                return null;
-            }
-
-            // Landscape covers creatures, NPCs and most world objects. Players are queried
-            // separately as well so a player standing in an already-crowded cell cannot be
-            // missed if the landscape view omits them.
-            bool anyRead = false;
-            if (AddMatches(found, seen, worldFilter.GetLandscape(), target, worldFilter, playerId)) { anyRead = true; }
-            if (AddMatches(found, seen, worldFilter.GetByObjectClass(ObjectClass.Player), target, worldFilter, playerId)) { anyRead = true; }
-            if (!anyRead) { return null; }
-
-            found.Sort(new Comparison<AppraiseCandidate>(CompareByDistance));
-            return found;
-        }
-
-        private bool AddMatches(
-            List<AppraiseCandidate> found,
-            Dictionary<int, bool> seen,
-            WorldObjectCollection collection,
-            string target,
-            WorldFilter worldFilter,
-            int playerId)
-        {
-            if (collection == null) { return false; }
-            try
-            {
-                foreach (WorldObject worldObject in collection)
-                {
-                    if (worldObject == null) { continue; }
-                    AppraiseCandidate candidate = MakeCandidate(worldObject, worldFilter, playerId);
-                    if (candidate == null) { continue; }
-                    if (candidate.Name == null) { continue; }
-                    if (candidate.Name.IndexOf(target, StringComparison.OrdinalIgnoreCase) < 0) { continue; }
-                    if (seen.ContainsKey(candidate.Id)) { continue; }
-                    seen[candidate.Id] = true;
-                    found.Add(candidate);
-                }
-                return true;
-            }
-            catch (Exception exc)
-            {
-                log.WriteError("appraise: error scanning world objects: {0}", exc);
-                return false;
-            }
-        }
-
-        private static AppraiseCandidate MakeCandidate(WorldObject worldObject, WorldFilter worldFilter, int playerId)
-        {
-            AppraiseCandidate candidate = new AppraiseCandidate();
-            try { candidate.Id = worldObject.Id; }
-            catch (Exception) { return null; }
-            try { candidate.Name = worldObject.Name; }
-            catch (Exception) { candidate.Name = null; }
-            try { candidate.ObjectClass = worldObject.ObjectClass.ToString(); }
-            catch (Exception) { candidate.ObjectClass = "Unknown"; }
-            try { candidate.Distance = worldFilter.Distance(playerId, candidate.Id); }
-            catch (Exception) { candidate.Distance = double.MaxValue; }
-            return candidate;
-        }
-
-        private static int CompareByDistance(AppraiseCandidate left, AppraiseCandidate right)
-        {
-            return left.Distance.CompareTo(right.Distance);
-        }
 
         /// <summary>
         /// Emit one machine-readable record into chatlog_[pid].jsonl so a harness can await
@@ -354,27 +256,6 @@ namespace ThwargFilter
             {
                 log.WriteError("appraise: RequestId({0}) failed: {1}", objectId, exc);
                 return false;
-            }
-        }
-
-        private class AppraiseCandidate
-        {
-            public int Id;
-            public string Name;
-            public string ObjectClass;
-            public double Distance = double.MaxValue;
-
-            public string Describe()
-            {
-                string distanceText = (Distance == double.MaxValue
-                    ? "?"
-                    : Distance.ToString("F3"));
-                return string.Format(
-                    "'{0}' id={1} class={2} distance={3}",
-                    Name,
-                    Id,
-                    ObjectClass,
-                    distanceText);
             }
         }
     }

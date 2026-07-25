@@ -53,6 +53,16 @@ namespace Filter.Shared
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 25);
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 31);
         }
+        /// <summary>Press and hold a key in the game window. Pair with SendKeyUp.</summary>
+        public static void SendKeyDown(char ch)
+        {
+            PostMsgs.SendKeyDown(CoreManager.Current.Decal.Hwnd, ch);
+        }
+        /// <summary>Release a key previously pressed with SendKeyDown.</summary>
+        public static void SendKeyUp(char ch)
+        {
+            PostMsgs.SendKeyUp(CoreManager.Current.Decal.Hwnd, ch);
+        }
         public static void SendMouseClick(int x, int y)
         {
             PostMsgs.SendMouseClick(CoreManager.Current.Decal.Hwnd, (short)x, (short)y);
