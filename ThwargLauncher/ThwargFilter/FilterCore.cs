@@ -29,6 +29,8 @@ namespace ThwargFilter
 
         private DateTime _lastServerDispatchUtc = DateTime.MinValue;
         private static FilterCore theFilterCore = null;
+        // Only unsubscribe chat box capture in Shutdown if subscribing actually succeeded.
+        private bool _chatBoxMessageSubscribed;
 
 
         private string PluginName { get { return FileLocations.FilterName; } }
@@ -60,7 +62,18 @@ namespace ThwargFilter
             // Chat window capture for the test observation channel. Decal plugin output
             // (UtilityBelt, VirindiTank) is drawn client side and never appears as a
             // server message, so ServerDispatch alone cannot see it.
-            CoreManager.Current.ChatBoxMessage += new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+            // Guarded on its own: this is an optional observation feature, and it must
+            // never be able to abort Startup and take the core filter (heartbeat,
+            // channel, auto-login) down with it.
+            try
+            {
+                CoreManager.Current.ChatBoxMessage += new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+                _chatBoxMessageSubscribed = true;
+            }
+            catch (Exception ex)
+            {
+                log.WriteError("Failed to subscribe chat box capture, continuing without it: {0}", ex);
+            }
         }
 
         public static DateTime GetLastServerDispatchUtc()
@@ -88,7 +101,20 @@ namespace ThwargFilter
 
             CommandLineText -= new EventHandler<ChatParserInterceptEventArgs>(FilterCore_CommandLineText);
 
-            CoreManager.Current.ChatBoxMessage -= new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+            // Mirror of the guarded subscribe in Startup: only unsubscribe if we managed
+            // to subscribe, and never let a failure here abort Shutdown.
+            if (_chatBoxMessageSubscribed)
+            {
+                try
+                {
+                    CoreManager.Current.ChatBoxMessage -= new EventHandler<ChatTextInterceptEventArgs>(Current_ChatBoxMessage);
+                    _chatBoxMessageSubscribed = false;
+                }
+                catch (Exception ex)
+                {
+                    log.WriteError("Failed to unsubscribe chat box capture: {0}", ex);
+                }
+            }
 
             log.WriteInfo("FilterCore-Shutdown");
         }
