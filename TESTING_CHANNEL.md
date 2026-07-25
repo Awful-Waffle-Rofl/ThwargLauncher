@@ -327,6 +327,7 @@ client-side state into a chat line you can assert on.
 | `dumpstate` snapshot | `ThwargLauncher\ThwargFilter\Observation\GameStateDumper.cs` |
 | file paths | `ThwargLauncher\ThwargFilter\FileLocations.cs` |
 | `dumpstate` verb wiring | `ThwargLauncher\ThwargFilter\FilterCommands\FilterCommandParser.cs` |
+| `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
 | command file format | `ThwargLauncher\ThwargFilter\Channels\` |
 
@@ -399,3 +400,83 @@ StatusNote:requested character 'Cray' not found; available: [+Cray,Alice]
 
 The account holds `+Cray` (an admin-promoted name) but the launcher asked for `Cray`.
 The same message is written to the filter log via `log.WriteError`.
+
+---
+
+## 9. Appraisal
+
+Several ACE admin commands act on the **last-appraised object** rather than on a named
+target: `/remove-vitae` and the creature branch of `/heal` are the ones that bit us. Before
+this verb there was no chat-command path to appraise a creature or a player, so those
+commands could not be reliably aimed from a harness.
+
+### Selection is not appraisal
+
+This is the trap that cost a live run three readbacks. They are two different things:
+
+* **Selection** is client side. Decal's `Actions.SelectItem` / `Actions.CurrentSelection`,
+  and `/ub selectp`, change what the client considers selected. The server is not told.
+* **Appraisal** is a server round trip. Only an identify request (Decal's
+  `Actions.RequestId`) makes the server record a new appraisal target.
+
+So `/ub selectp` registers a selection but never appraises. `/ub propertydump` did not
+unblock it in practice either, and `/ub dumpskills` is silent. None of them are a
+substitute for an identify.
+
+### The verb
+
+Reachable over the launcher channel as `appraise ...` (or `/tf appraise ...`), and typed
+in game as `/tf appraise ...`. It is registered in `/tf help`.
+
+| command | effect |
+| --- | --- |
+| `appraise` | appraise the logged in character |
+| `appraise self` | same as bare `appraise` |
+| `appraise <name-substring>` | case insensitive substring match over landscape objects and players |
+
+Matching rules for the substring form:
+
+* **Exactly one match** - that object is appraised.
+* **Zero matches** - nothing is appraised, and the log says so.
+* **More than one match** - nothing is appraised. The candidates are logged, nearest
+  first, with id, object class and distance, so you can narrow the substring.
+
+The ambiguous case deliberately does **not** guess. Picking one arbitrarily would silently
+aim the next admin command at the wrong object, which is worse than doing nothing.
+
+Results go to the filter log, whose path is published in the heartbeat as `LogFilepath`
+(see section 1). Sample lines:
+
+```
+Appraiser: appraise requested for 'drudge'
+appraise 'drudge': ambiguous, 3 matches; nothing appraised. Narrow the substring.
+appraise candidate: 'Drudge Skulker' id=2151000001 class=Monster distance=0.014
+appraise candidate: 'Drudge Prowler' id=2151000042 class=Monster distance=0.031
+appraise candidate: 'Drudge Slinker' id=2151000077 class=Monster distance=0.058
+```
+
+Appraisal is asynchronous in two steps: the verb marshals onto the game thread and issues
+the identify on the next rendered frame, and the server then answers in its own time.
+Allow a beat between `appraise` and the admin command that depends on it.
+
+### Caveat: appraisal target drift
+
+**The filter itself can move the server's appraisal target out from under you.**
+
+`ThwargInventory` subscribes to `CoreManager.Current.ItemSelected` and automatically calls
+`Actions.RequestId` for any inventory item it has not seen before
+(`ThwargLauncher\ThwargFilter\ThwargInventory.cs`). That is an appraisal. So selecting or
+hovering inventory items mid-test re-points the server's last-appraised object at a random
+item, and a subsequent `/remove-vitae` or `/heal` aims at that item instead of your intended
+target.
+
+Practical rules:
+
+* Issue `appraise` as late as possible, immediately before the admin command that consumes
+  it.
+* Do not touch inventory between the `appraise` and the command.
+* If a target-sensitive admin command behaves as though it hit the wrong thing, suspect
+  drift first and re-issue `appraise`.
+
+This auto-identify is pre-existing filter behaviour and is deliberately left alone here.
+Making it suppressible is a possible follow-up if it keeps interfering.

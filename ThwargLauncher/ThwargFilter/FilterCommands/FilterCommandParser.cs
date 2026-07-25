@@ -67,10 +67,13 @@ namespace ThwargFilter
         private const string CMD_UnlockWindowPosition = "unlockwindowposition";
         private const string CMD_UnlockWindowPosition2 = "ulwp";
         private const string CMD_DumpState = "dumpstate";
+        private const string CMD_Appraise = "appraise";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
         private GameStateDumper _gameStateDumper;
         public GameStateDumper GameState { set { _gameStateDumper = value; } }
+        private Appraiser _appraiser;
+        public Appraiser Appraise { set { _appraiser = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -115,6 +118,7 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_UnlockWindowPosition, UnlockWindowPositionCommandHandler, "Save and unlock window positions ('/tf ulwp')");
             cmdHandlers.Add(CMD_UnlockWindowPosition2, UnlockWindowPositionCommandHandler, null);
             cmdHandlers.Add(CMD_DumpState, DumpStateCommandHandler, "Snapshot game state to gamestate_<pid>.txt ('/tf dumpstate')");
+            cmdHandlers.Add(CMD_Appraise, AppraiseCommandHandler, "Appraise self or a named target ('/tf appraise self', '/tf appraise Cray')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -136,6 +140,14 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_DumpState, out commandString))
             {
                 DumpStateCommandHandler(commandString);
+            }
+            // Same reasoning as dumpstate: appraise touches game state, and this runs on
+            // the heartbeat timer or FileSystemWatcher thread, so it must not be dispatched
+            // to the game's chat parser from here.
+            else if (IsCommandPrefix(command, CMD_Appraise, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Appraise, out commandString))
+            {
+                AppraiseCommandHandler(commandString);
             }
             else
             {
@@ -242,6 +254,17 @@ namespace ThwargFilter
                 return;
             }
             _gameStateDumper.RequestDump();
+        }
+        private void AppraiseCommandHandler(string command)
+        {
+            if (_appraiser == null)
+            {
+                log.WriteError("appraise requested but no Appraiser is wired up");
+                return;
+            }
+            // The command constant has no trailing space, so both "/tf appraise" and
+            // "/tf appraise Cray" match; the remainder needs trimming either way.
+            _appraiser.RequestAppraise(command == null ? "" : command.Trim());
         }
         private void KillClientCommandHandler(string command)
         {
