@@ -12,10 +12,42 @@ namespace ThwargFilter
     {
         private IdMap _items = new IdMap();
         private bool disposed;
+        // Auto identify on item selection is ON by default, preserving existing behavior.
+        // A test rig turns it OFF so that its own appraisal target cannot drift: this hook
+        // issues a real RequestId, which moves the SERVER's last-appraised object, and ACE
+        // admin commands like /remove-vitae act on exactly that object.
+        private bool _autoIdentifyEnabled = true;
 
         public ThwargInventory()
         {
             CoreManager.Current.ItemSelected += Current_ItemSelected;
+        }
+
+        public bool AutoIdentifyEnabled
+        {
+            get { return _autoIdentifyEnabled; }
+        }
+
+        /// <summary>
+        /// Enable or disable the automatic RequestId on item selection.
+        /// Returns true if the state actually changed.
+        /// </summary>
+        public bool SetAutoIdentifyEnabled(bool enabled)
+        {
+            bool changed = (_autoIdentifyEnabled != enabled);
+            _autoIdentifyEnabled = enabled;
+            if (changed)
+            {
+                log.WriteInfo(
+                    "Inventory auto identify hook is now {0}; appraisal target drift from item selection is {1}",
+                    (enabled ? "ON" : "OFF"),
+                    (enabled ? "possible" : "suppressed"));
+            }
+            else
+            {
+                log.WriteInfo("Inventory auto identify hook already {0}", (enabled ? "ON" : "OFF"));
+            }
+            return changed;
         }
 
 
@@ -45,6 +77,14 @@ namespace ThwargFilter
         private void Current_ItemSelected(object sender, ItemSelectedEventArgs e)
         {
             if (e.ItemGuid == 0) { return; }
+            if (!_autoIdentifyEnabled)
+            {
+                // Suppressed by "/tf inventoryhook off" so a rig can pin the server's
+                // appraisal target. Deliberately does not record the item as seen, so
+                // normal behavior resumes cleanly when the hook is turned back on.
+                log.WriteDebug("Item selected {0} - auto identify suppressed", e.ItemGuid);
+                return;
+            }
             if (!_items.ContainsKey(e.ItemGuid))
             {
                 log.WriteDebug("Item selected {0} - sending request", e.ItemGuid);

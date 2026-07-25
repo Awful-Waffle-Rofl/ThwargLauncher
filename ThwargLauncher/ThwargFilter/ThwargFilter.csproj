@@ -91,6 +91,7 @@
     <Compile Include="FilterCommands\GameRepo.cs" />
     <Compile Include="FilterCommands\FilterCommandExecutor.cs" />
     <Compile Include="FilterCommands\FilterCommandParser.cs" />
+    <Compile Include="Observation\Appraiser.cs" />
     <Compile Include="Observation\ChatLogWriter.cs" />
     <Compile Include="Observation\ChatObserver.cs" />
     <Compile Include="Observation\GameStateDumper.cs" />
