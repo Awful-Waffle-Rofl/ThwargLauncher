@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Windows.Forms;
 using Util;
+using Filter.Shared;
 
 namespace KeyUtil
 {
@@ -108,6 +109,41 @@ namespace KeyUtil
             byte code = CharCode(ch);
             uint lparam = (uint)((ScanCode(ch) << 0x10) | 1);
             User32.PostMessage(wnd, User32.WM_KEYDOWN, (IntPtr)code, (UIntPtr)(lparam));
+            User32.PostMessage(wnd, User32.WM_KEYUP, (IntPtr)code, (UIntPtr)(0xC0000000 | lparam));
+        }
+        /// <summary>
+        /// Press a named key, with a correctly constructed lParam including the
+        /// extended-key bit. Use this for anything outside a-z: CharCode/ScanCode below
+        /// only map a-z, '/' and space and fall through to 0x20, so the navigation keys
+        /// AC uses for combat cannot be expressed that way at all.
+        /// </summary>
+        public static void SendNamedKeyDown(IntPtr wnd, NamedKey key)
+        {
+            User32.PostMessage(wnd, User32.WM_KEYDOWN, (IntPtr)key.VirtualKey, (UIntPtr)key.KeyDownLParam);
+        }
+        /// <summary>Release a named key previously pressed with SendNamedKeyDown.</summary>
+        public static void SendNamedKeyUp(IntPtr wnd, NamedKey key)
+        {
+            User32.PostMessage(wnd, User32.WM_KEYUP, (IntPtr)key.VirtualKey, (UIntPtr)key.KeyUpLParam);
+        }
+        /// <summary>
+        /// Press and HOLD a key. Must be paired with SendKeyUp or the client keeps
+        /// believing the key is down. Used for the attack verb, because the AC client
+        /// attacks for as long as the attack input is held.
+        /// </summary>
+        public static void SendKeyDown(IntPtr wnd, char ch)
+        {
+            byte code = CharCode(ch);
+            uint lparam = (uint)((ScanCode(ch) << 0x10) | 1);
+            User32.PostMessage(wnd, User32.WM_KEYDOWN, (IntPtr)code, (UIntPtr)(lparam));
+        }
+        /// <summary>
+        /// Release a key previously pressed with SendKeyDown.
+        /// </summary>
+        public static void SendKeyUp(IntPtr wnd, char ch)
+        {
+            byte code = CharCode(ch);
+            uint lparam = (uint)((ScanCode(ch) << 0x10) | 1);
             User32.PostMessage(wnd, User32.WM_KEYUP, (IntPtr)code, (UIntPtr)(0xC0000000 | lparam));
         }
         public static void SendMsg(IntPtr wnd, string msg)

@@ -176,7 +176,7 @@ milliseconds.
   "nearbyTotal": 137,
   "nearbyTruncated": true,
   "nearby": [
-    { "id": 2151000001, "name": "Drudge Skulker", "objectClass": "Monster", "distance": 0.014 }
+    { "id": 1073741825, "name": "Drudge Skulker", "objectClass": "Monster", "distance": 0.014 }
   ],
   "notes": []
 }
@@ -329,6 +329,8 @@ client-side state into a chat line you can assert on.
 | `dumpstate` verb wiring | `ThwargLauncher\ThwargFilter\FilterCommands\FilterCommandParser.cs` |
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
+| `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
+| shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
 | command file format | `ThwargLauncher\ThwargFilter\Channels\` |
@@ -480,9 +482,9 @@ Results also go to the filter log, whose path is published in the heartbeat as
 ```
 Appraiser: appraise requested for 'drudge'
 appraise 'drudge': ambiguous, 3 matches; nothing appraised. Narrow the substring.
-appraise candidate: 'Drudge Skulker' id=2151000001 class=Monster distance=0.014
-appraise candidate: 'Drudge Prowler' id=2151000042 class=Monster distance=0.031
-appraise candidate: 'Drudge Slinker' id=2151000077 class=Monster distance=0.058
+appraise candidate: 'Drudge Skulker' id=1073741825 class=Monster distance=0.014
+appraise candidate: 'Drudge Prowler' id=1073741842 class=Monster distance=0.031
+appraise candidate: 'Drudge Slinker' id=1073741877 class=Monster distance=0.058
 ```
 
 Appraisal is asynchronous in two steps: the verb marshals onto the game thread and issues
@@ -536,3 +538,240 @@ Remaining rules even with the hook off:
 * Restore `inventoryhook on` at cleanup. The setting is per game process and lives only in
   memory, so it resets on client restart, but leaving it off will confuse the next person
   to use that client interactively.
+
+---
+
+## 10. Attacking
+
+`attack <name-substring>` and `attackstop`, over the channel or as `/tf`, both listed in
+`/tf help`. Target resolution is **identical to `appraise`** (same shared resolver): exactly
+one match attacks, zero or several do nothing and log the candidates nearest first.
+
+Each attempt emits an `AttackResult` record into `chatlog_<pid>.jsonl`, the same shape as
+`AppraiseResult` (section 9): `source:"filter"`, `type:"AttackResult"`, plus `target`,
+`outcome` (`requested` | `ambiguous` | `notfound`), `resolvedId`/`resolvedName` when
+requested, `candidateCount` when ambiguous.
+
+```json
+{"utc":"...","source":"filter","type":"AttackResult","target":"drudge","outcome":"requested","resolvedId":1073741825,"resolvedName":"Drudge Skulker","seq":7}
+```
+
+### Read this before trusting `attack`
+
+**Decal has no attack API.** This was established by enumerating every member of
+`Decal.Adapter.Wrappers.HooksWrapper` and of the raw COM interface behind it,
+`Decal.Interop.Core.IACHooks` (137 members). The only combat-adjacent members are:
+
+| member | what it does |
+| --- | --- |
+| `SetCombatMode(CombatState)` | enter or leave combat mode (`Peace`, `Melee`, `Missile`, `Magic`) |
+| `CombatMode` | read the current mode |
+| `SelectItem(int)` / `CurrentSelection` | client side selection |
+| `UseItem(int, int)` | "use" an object |
+
+There is no `Attack`, `AttackSelected` or `MeleeAttack`, and there is no way to send a
+client to server message either. (`Decal.Interop.Net`'s `Dispatch` members are the inbound
+callback interface Decal calls **on** filters, not a send path.)
+
+So `attack` does the only thing left:
+
+1. resolve the target by name (real API, reliable)
+2. `Actions.SelectItem(id)` and set `CurrentSelection` (real API, reliable)
+3. `Actions.SetCombatMode(...)` (real API, reliable)
+4. **synthesize the client's attack input** (not an API; see below)
+
+Steps 1 to 3 are ordinary Decal calls. Step 4 is synthetic input, but it is no longer
+guesswork: the exact recipe below is live-verified.
+
+**`outcome:"requested"` therefore means "input was issued", NOT "the character is
+confirmed to be swinging."** Verify the effect by other means: the target's health
+dropping, combat chat in `chatlog_<pid>.jsonl`, or a `dumpstate` vitals read.
+
+### Step 4: the verified attack recipe
+
+Live-verified against a target dummy, in melee and in missile mode. After the select and
+combat-mode steps, post to the client window:
+
+```
+WM_KEYDOWN  wParam = VK_END (0x23)   lParam = 0x014F0001
+   ... hold about 200 ms ...
+WM_KEYUP    wParam = VK_END (0x23)   lParam = 0xC14F0001
+```
+
+Two things about that lParam matter, and both were wrong in the first version of this verb:
+
+* **The extended-key bit (bit 24) must be set.** End is an extended key. `0x014F0001` is
+  repeat count 1, scan code `0x4F` in bits 16-23, extended bit set. Key up is the same
+  value with bits 30 and 31 added, hence `0xC14F0001`.
+* **The key cannot be expressed as a character.** `PostMsgs.CharCode()` / `ScanCode()` map
+  only `a-z`, `/` and space and fall through to `0x20` for everything else, and never set
+  the extended bit. The old character-typed `AttackKey` setting was therefore
+  unreachable-by-construction for End, Delete and the rest. Keys are now selected by
+  **name** against a table that carries the scan code and extended flag.
+
+**One tap is enough.** The tap starts the client's own repeating attack loop; it does not
+need to be held down. A second tap does **not** stop it. `attackstop` (peace mode) is the
+only way to stop attacking.
+
+### Settings
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `AttackKey` | `End` | key **name** from the vocabulary below |
+| `AttackKeyHoldMs` | `200` | milliseconds between the key down and key up of the tap |
+| `AttackCombatMode` | `Melee` | `Melee`, `Missile` or `Magic`, passed to `SetCombatMode` |
+| `AttackMethod` | `key` | `key` posts the tap, `useitem` calls `Actions.UseItem(target, 0)`, `both` |
+
+The defaults are the verified recipe. `AttackMethod=useitem` is retained only as a
+fallback; it is not the proven path. An unrecognized `AttackKey` logs an error listing the
+valid names and falls back to `End` rather than posting something arbitrary.
+
+### Native key vocabulary
+
+These are the AC combat keys, as bound in the client keymap.
+
+| name | vk | scan | extended | what it does in game |
+| --- | --- | --- | --- | --- |
+| `End` | `0x23` | `0x4F` | yes | attack low / missile aim low / cast current spell |
+| `Delete` | `0x2E` | `0x53` | yes | attack high / missile aim high |
+| `PageDown` | `0x22` | `0x51` | yes | attack medium / missile aim medium |
+| `Insert` | `0x2D` | `0x52` | yes | attack bar step down |
+| `PageUp` | `0x21` | `0x49` | yes | attack bar step up |
+| `Apostrophe` | `0xDE` | `0x28` | no | select closest monster |
+| `Backtick` | `0xC0` | `0x29` | no | toggle combat mode |
+
+The three attack-height keys double as **missile aim heights** in missile mode. The two bar
+keys read as **power and speed** in melee and as **accuracy** in missile. The keymap also
+binds `DIK_END` to `CombatCastCurrentSpell` in MagicCombat mode, so the same End tap should
+fire casting once a spell is selected.
+
+Aliases `PgDn`, `PgUp`, `Del`, `Ins`, `Grave` and `Quote` are accepted.
+
+**Verification status:** only the `End` row is live-verified. The others are derived from
+the same standard PS/2 set 1 scan-code table and share End's shape, so they are high
+confidence but not individually proven.
+
+### The keymap is the authoritative binding source
+
+Which key does what is the player's own binding, not a constant. The authoritative file is:
+
+```
+C:\Users\danie\OneDrive\Documents\Asheron's Call\acclient.keymap
+```
+
+**DIK vs VK caveat:** that file records bindings as **DIK** (DirectInput) scan codes, not
+virtual key codes. `DIK_END` is `0xCF`, which is the base make code `0x4F` with
+DirectInput's extended marker `0x80` added. The table above splits that into the scan code
+and the extended flag that a `WM_KEYDOWN` lParam actually wants. So: read the keymap for
+**which** key is bound to a combat action, and read the table above for **how** to post it.
+
+### Remaining caveats
+
+* Posted input cannot be confirmed. Nothing reports back that the client acted on it, so
+  `outcome:"requested"` still means "input was issued", not "the character is swinging".
+  Verify by target health, combat chat, or a `dumpstate` vitals read.
+* It is `PostMessage` to the game window, so a minimized or input-blocked client may
+  ignore it.
+* Bindings are per-player. If the keymap differs from the table, set `AttackKey`
+  accordingly.
+
+### Stopping, and stop latency
+
+`attackstop` releases any key still held and sets `CombatState.Peace`.
+
+Inside the filter, stop is handled on the **next render frame** (order of milliseconds):
+the stop flag is checked before queued attacks, and it clears the attack queue, so it can
+never be stuck behind a backlog. The dominant latency is the **launcher channel**, not the
+filter: inbound commands are picked up by a `FileSystemWatcher` (near instant) or the 3
+second heartbeat timer as fallback. A harness that writes `incmds_<pid>.txt` gets the
+watcher path.
+
+Batch 5 saw one `attackstop` appear to lag about 13 seconds in an ambiguous case, but a
+controlled retest stopped within one swing. If a slow stop recurs, check first whether the
+`attack` that preceded it actually resolved: an ambiguous or not-found `attack` never
+started anything, so what looks like a slow stop may be an attack that never began.
+
+### Missile
+
+Missile needs no separate call: `SetCombatMode` takes `CombatState.Missile` through the
+same path, and the attack-height keys are the missile aim heights, so the same End tap is
+verified to work in missile mode. A bow must be equipped first, because nothing here
+wields anything.
+
+---
+
+## 11. Plugin output cannot be captured (proven negative)
+
+Chat lines that other Decal plugins print with their own prefixes (`[UB]`, `[VTank]`) are
+**not capturable by this filter**. This section records the evidence so nobody re-opens the
+question, and gives the workarounds.
+
+### Why
+
+`ChatBoxMessage` (section 4) sees text drawn into the client's chat window. Plugins using
+the standard Virindi chat connector do not go that way when VCS is running:
+
+```csharp
+// Shared\VCS_Connector.cs, the connector UtilityBelt and VirindiTank build on
+if (IsVCSPresent(host))
+    VCS5.PluginCore.Instance.FilterOutputText(text, window, color);   // VCS renders it
+else
+    host.Actions.AddChatTextRaw(text, color, window);                 // client chat window
+```
+
+`FilterOutputText` hands the text to VCS5's own window rendering. It never reaches the
+client chat window, so Decal never raises `ChatBoxMessage`, so the filter is blind to it.
+
+### Why we cannot hook it
+
+`VCS5.dll` was enumerated in full: **98 types, and zero events on any of them**, public or
+private. Its entire public surface that touches text is write-only or a pure function:
+
+| member | direction |
+| --- | --- |
+| `PluginCore.FilterOutputText(string, int, int)` | write |
+| `Presets.FilterOutputPreset(...)` / `RegisterPreset(...)` | write |
+| `Rules.ApplyRules(string, int, int)` | pure function you call, not a hook |
+| `Actions.ProcessAction(...)` | write |
+
+There is no "text added" event, no observer registration, and no interception point. VCS5
+is additionally Dotfuscator-obfuscated, so its internals are single letter names that are
+free to change between releases; reaching into them by reflection would be a filter that
+breaks on somebody else's upgrade. Note also that VCS5 itself *consumes* Decal's
+`ChatBoxMessage` (it has a private handler taking `ChatTextInterceptEventArgs`), which
+confirms the direction of travel: VCS is downstream of the event we already listen to, not
+a producer we can subscribe to.
+
+**Conclusion: with VCS running, plugin output is uncapturable from a Decal filter.**
+
+### What to do instead
+
+In rough order of preference:
+
+1. **Use server-routed probes.** Anything the SERVER says is captured, reliably and with
+   structure, as `source:"network"`. Prefer an ACE admin command over a plugin command
+   whenever both could answer the question.
+2. **Use the filter's own verbs.** `dumpstate` (section 3) already covers position,
+   vitals and nearby objects, which is most of what `/ub pos` and friends were being used
+   for, and it lands in a structured file rather than a chat line.
+3. **Running the rig without VCS: UNVERIFIED, and observed failing.** Per the connector
+   above, when VCS is *not* running the same plugins fall back to
+   `Actions.AddChatTextRaw`, so in theory the text reaches the client chat window and
+   becomes visible on `source:"chatbox"`.
+
+   **Batch 5 contradicts this.** Plugin text was observed drawn in the client's own chat
+   window and still did not appear in capture. So either `AddChatTextRaw` does not raise
+   `ChatBoxMessage` (plausible: it is the client adding text to itself, not text arriving
+   through the path Decal intercepts), or those plugins do not use this connector, or VCS
+   was still active in that configuration. The cause was not isolated.
+
+   Treat this as a lead, not a workaround. Do not build a rig on it.
+
+What will **not** work, so nobody spends time on it: subscribing to VCS5 (no events),
+scraping VCS windows (rendering only, no text model exposed), or reflecting into VCS5
+internals (obfuscated and unstable).
+
+**The reliable rule is server-routed probes only.** Anything that must be asserted on has
+to come from the server (`source:"network"`) or from this filter's own verbs, which write
+structured records. Plugin chat output is not a supported observation channel, in any
+configuration, until somebody proves otherwise in game.

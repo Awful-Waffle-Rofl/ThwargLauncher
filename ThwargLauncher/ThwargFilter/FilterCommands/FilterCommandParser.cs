@@ -72,12 +72,20 @@ namespace ThwargFilter
         private const string CMD_UnlockWindowPosition2 = "ulwp";
         private const string CMD_DumpState = "dumpstate";
         private const string CMD_Appraise = "appraise";
+        // NOTE: "attackstop" MUST be registered and tested before "attack", because command
+        // matching breaks on the first prefix hit and "attackstop" starts with "attack".
+        // Registering it second would make "/tf attackstop" start an attack on a creature
+        // whose name contains "stop", or silently resolve nothing.
+        private const string CMD_AttackStop = "attackstop";
+        private const string CMD_Attack = "attack";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
         private GameStateDumper _gameStateDumper;
         public GameStateDumper GameState { set { _gameStateDumper = value; } }
         private Appraiser _appraiser;
         public Appraiser Appraise { set { _appraiser = value; } }
+        private Attacker _attacker;
+        public Attacker Attack { set { _attacker = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -126,6 +134,9 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_UnlockWindowPosition2, UnlockWindowPositionCommandHandler, null);
             cmdHandlers.Add(CMD_DumpState, DumpStateCommandHandler, "Snapshot game state to gamestate_<pid>.txt ('/tf dumpstate')");
             cmdHandlers.Add(CMD_Appraise, AppraiseCommandHandler, "Appraise self or a named target ('/tf appraise self', '/tf appraise Cray')");
+            // attackstop before attack: the matching loop breaks on the first prefix hit.
+            cmdHandlers.Add(CMD_AttackStop, AttackStopCommandHandler, "Stop attacking and return to peace mode ('/tf attackstop')");
+            cmdHandlers.Add(CMD_Attack, AttackCommandHandler, "Attack a named target ('/tf attack Drudge Skulker')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -162,6 +173,17 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_InventoryHook, out commandString))
             {
                 InventoryHookCommandHandler(commandString);
+            }
+            // attackstop MUST be tested before attack: "attackstop" starts with "attack".
+            else if (IsCommandPrefix(command, CMD_AttackStop, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_AttackStop, out commandString))
+            {
+                AttackStopCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_Attack, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Attack, out commandString))
+            {
+                AttackCommandHandler(commandString);
             }
             else
             {
@@ -255,6 +277,24 @@ namespace ThwargFilter
         private void LeaveTeam(string team)
         {
             myTeams.Remove(team);
+        }
+        private void AttackCommandHandler(string command)
+        {
+            if (_attacker == null)
+            {
+                log.WriteError("attack requested but no Attacker is wired up");
+                return;
+            }
+            _attacker.RequestAttack(command == null ? "" : command.Trim());
+        }
+        private void AttackStopCommandHandler(string command)
+        {
+            if (_attacker == null)
+            {
+                log.WriteError("attackstop requested but no Attacker is wired up");
+                return;
+            }
+            _attacker.RequestStop();
         }
         private void InventoryHookCommandHandler(string command)
         {
