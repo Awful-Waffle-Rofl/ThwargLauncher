@@ -39,6 +39,19 @@ other file described here. The heartbeat is rewritten roughly every 3 seconds
 3. Read `CharacterName` / `ServerName` / `AccountName` from the file to pick the right
    client when several are running.
 
+The heartbeat starts as soon as the filter loads, **before any server contact**, so
+`game_<pid>.txt` appears within about one beat (~3s) of process start even if the client
+never manages to connect. That is what makes section 8 possible.
+
+Because of that, the earliest heartbeats carry an **empty `ServerName` and
+`AccountName`**: the filter cannot know which account it belongs to until the server
+sends the character list. Identity fields fill in as login progresses. A harness that
+matches on server or account must tolerate them being blank for the first few beats, and
+should match on pid instead.
+
+From file version 1.5 the heartbeat also carries `LoginStage`, `SecondsInStage`,
+`RequestedCharacter` and `StatusNote`. See section 8.
+
 ---
 
 ## 2. Sending commands (`incmds_<pid>.txt`)
@@ -321,3 +334,68 @@ Every observation handler swallows its own exceptions and never rethrows, so a p
 in this code cannot break the filter or the game. Failures are reported to the filter log
 (`%AppData%\ThwargLauncher\Logs\ThwargFilter_<pid>_log.txt`), rate limited so a repeating
 error cannot fill the disk.
+
+---
+
+## 8. Diagnosing login stalls
+
+A client that fails to reach the world used to be diagnosable only by waiting for a
+timeout and guessing. The heartbeat now reports how far it got, so the diagnosis is a
+single file read.
+
+### Fields (heartbeat file version 1.5 and later)
+
+| field | meaning |
+| --- | --- |
+| `LoginStage` | `Starting`, `CharSelect` or `InWorld` |
+| `SecondsInStage` | seconds since the stage last changed; keeps rising while wedged |
+| `RequestedCharacter` | the character name the launcher asked for |
+| `StatusNote` | free text explaining why the client is stuck, empty when nothing is wrong |
+| `LastServerDispatchSecondsAgo` | seconds since the last server message, or **-1** if the client has never heard from a server at all |
+
+Stage transitions:
+
+* `Starting` is set when the filter loads.
+* `CharSelect` is set when the server's character list (message `0xF658`) arrives. This is
+  the first proof that the client actually reached the server.
+* `InWorld` is set when a character materializes after a fresh login.
+
+Logging out back to character select moves the stage back to `CharSelect`, so the field
+always describes the present, not the high water mark. Re-entering the stage the client is
+already in does not reset `SecondsInStage`, which is what makes a wedge visible as a
+steadily rising number.
+
+`StatusNote` is cleared automatically whenever the stage genuinely changes, so a note is
+always about the stage it appears next to.
+
+### Decision table
+
+Read `game_<pid>.txt` and match top to bottom:
+
+| observation | diagnosis | action |
+| --- | --- | --- |
+| No `game_<pid>.txt` at all, ~10s after process start | The filter never loaded. This is an injection problem, not a login problem. | Check Decal injection and that `ThwargFilter.dll` is registered. The game process itself is irrelevant here. |
+| `LoginStage:Starting`, `LastServerDispatchSecondsAgo:-1`, `SecondsInStage` rising | Connection stall. The client never reached the server. Commonly the server is down, or a previous hard kill left an account session lingering server side and the new login is refused. | Wait and retry. A lingering session usually clears on its own after the server's timeout. |
+| `LoginStage:CharSelect` with a `StatusNote` naming the mismatch | Wrong character name. The requested name is not on this account. | Fix the name. Note that admin promotion renames the displayed character to `+Name`, so the launcher's stored name goes stale after a promotion. `StatusNote` lists the names the server actually offered. |
+| `LoginStage:CharSelect`, no `StatusNote`, `SecondsInStage` rising | The name matched but the character select automation did not complete: the click sequence failed, or the client is stuck behind a splash or a queue. | Check the filter log for the character select timer, and confirm the client window is not minimized or otherwise unable to receive synthetic clicks. |
+| `LoginStage:InWorld` and `IsOnline:True` | Healthy. | Proceed with the test. |
+
+Two supporting notes:
+
+* `LastServerDispatchSecondsAgo` is `-1` specifically to mean "no server contact ever",
+  which is now reachable because heartbeats start before the client connects. Do not read
+  `-1` as a small number: it is a sentinel, not a duration.
+* `RequestedCharacter` is populated as soon as the launch file is read, so it is available
+  for diagnosis even before the login attempt is made.
+
+### Example: the name mismatch case
+
+```
+LoginStage:CharSelect
+SecondsInStage:37
+RequestedCharacter:Cray
+StatusNote:requested character 'Cray' not found; available: [+Cray,Alice]
+```
+
+The account holds `+Cray` (an admin-promoted name) but the launcher asked for `Cray`.
+The same message is written to the filter log via `log.WriteError`.

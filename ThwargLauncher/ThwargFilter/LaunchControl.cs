@@ -206,6 +206,10 @@ namespace ThwargFilter
                 stream.WriteLine("ActualServerName:{0}", GameRepo.Game.Server);
                 stream.WriteLine("ActualAccountName:{0}", GameRepo.Game.Account);
                 stream.WriteLine("ActualCharacterName:{0}", GameRepo.Game.Character);
+                stream.WriteLine("LoginStage:{0}", status.LoginStage);
+                stream.WriteLine("SecondsInStage:{0}", status.SecondsInStage);
+                stream.WriteLine("RequestedCharacter:{0}", status.RequestedCharacter);
+                stream.WriteLine("StatusNote:{0}", status.StatusNote);
                 var text = stream.ToString();
                 return text;
             }
@@ -255,6 +259,14 @@ namespace ThwargFilter
                 info.Status.ActualServerName = SettingHelpers.GetSingleStringValue(settings, "ActualServerName");
                 info.Status.ActualAccountName = SettingHelpers.GetSingleStringValue(settings, "ActualAccountName");
                 info.Status.ActualCharacterName = SettingHelpers.GetSingleStringValue(settings, "ActualCharacterName");
+                // Present from file version 1.5 only. These MUST be read optionally:
+                // SettingsCollection.GetValue throws on a missing key, so reading them
+                // the normal way would make every older 1.4 heartbeat file fail to parse
+                // and the launcher would drop that game entirely during a rolling upgrade.
+                info.Status.LoginStage = GetOptionalStringValue(settings, "LoginStage");
+                info.Status.SecondsInStage = GetOptionalIntValue(settings, "SecondsInStage", 0);
+                info.Status.RequestedCharacter = GetOptionalStringValue(settings, "RequestedCharacter");
+                info.Status.StatusNote = GetOptionalStringValue(settings, "StatusNote");
 
                 info.IsValid = true;
             }
@@ -263,6 +275,41 @@ namespace ThwargFilter
                 log.WriteError("GetHeartbeatStatus exception: {0}", exc);
             }
             return info;
+        }
+        /// <summary>
+        /// Read a key that may be absent, for fields added in a later file version.
+        /// Returns null when the key is missing or has no value, and never throws.
+        /// </summary>
+        private static string GetOptionalStringValue(SettingsCollection settings, string key)
+        {
+            try
+            {
+                if (!settings.ContainsKey(key)) { return null; }
+                return SettingHelpers.GetSingleStringValue(settings, key);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+        /// <summary>
+        /// Read an int key that may be absent or blank, for fields added in a later file
+        /// version. Returns defval rather than throwing.
+        /// </summary>
+        private static int GetOptionalIntValue(SettingsCollection settings, string key, int defval)
+        {
+            try
+            {
+                string text = GetOptionalStringValue(settings, key);
+                if (string.IsNullOrEmpty(text)) { return defval; }
+                int value = defval;
+                if (!int.TryParse(text, out value)) { return defval; }
+                return value;
+            }
+            catch (Exception)
+            {
+                return defval;
+            }
         }
         private class StringSetting { public bool IsValid; public string Value; }
         private static StringSetting ParseStringSetting(string line, string prefix)

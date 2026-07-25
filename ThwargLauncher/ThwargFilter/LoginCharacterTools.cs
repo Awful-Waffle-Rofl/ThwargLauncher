@@ -50,6 +50,10 @@ namespace ThwargFilter
                 }
 
                 characters.Sort((a, b) => String.Compare(a.Name, b.Name, StringComparison.Ordinal));
+
+                // The character list is the definitive signal that we are connected and
+                // sitting at character select.
+                LoginStageTracker.SetStage(LoginStageTracker.STAGE_CharSelect);
             }
             if (!written)
             {
@@ -80,13 +84,46 @@ namespace ThwargFilter
 
         public bool LoginCharacter(string name)
         {
+            LoginStageTracker.SetRequestedCharacter(name);
             for (int i = 0; i < characters.Count; i++)
             {
                 if (String.Compare(characters[i].Name, name, StringComparison.OrdinalIgnoreCase) == 0)
                     return LoginByIndex(i);
             }
 
+            // The requested name is simply not on this account's list. Without this the
+            // client wedges silently at character select and the only symptom is a
+            // launcher timeout. A common cause is an admin promotion renaming the
+            // displayed character to "+Name".
+            ReportCharacterNotFound(name);
             return false;
+        }
+        private void ReportCharacterNotFound(string name)
+        {
+            try
+            {
+                string available = GetAvailableCharacterNames();
+                string note = string.Format(
+                    "requested character '{0}' not found; available: [{1}]",
+                    name,
+                    available);
+                log.WriteError(note);
+                LoginStageTracker.SetStatusNote(note);
+            }
+            catch (Exception exc)
+            {
+                log.WriteError("ReportCharacterNotFound exception: {0}", exc);
+            }
+        }
+        private string GetAvailableCharacterNames()
+        {
+            if (characters == null) { return ""; }
+            string[] names = new string[characters.Count];
+            for (int i = 0; i < characters.Count; i++)
+            {
+                names[i] = characters[i].Name;
+            }
+            return string.Join(",", names);
         }
 
         private const int XPixelOffset = 121;

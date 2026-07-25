@@ -172,6 +172,36 @@ namespace ThwargFilter
         }
 
         /// <summary>
+        /// Seconds since the last server to client message, or NO_SERVER_DISPATCH_YET when
+        /// the client has never heard from a server at all.
+        ///
+        /// Now that heartbeats start at filter startup rather than at login, the "never"
+        /// case is reachable and common. Subtracting DateTime.MinValue there yields about
+        /// 6.4e10 seconds, far outside int range; the unchecked cast happens to produce
+        /// int.MinValue on this runtime (measured), but that is unspecified in the C#
+        /// spec and is meaningless to a reader either way. The sentinel is negative so
+        /// existing consumers comparing against a positive timeout still behave as before.
+        /// </summary>
+        public const int NO_SERVER_DISPATCH_YET = -1;
+        private int GetLastServerDispatchSecondsAgo()
+        {
+            try
+            {
+                DateTime lastUtc = FilterCore.GetLastServerDispatchUtc();
+                if (lastUtc == DateTime.MinValue) { return NO_SERVER_DISPATCH_YET; }
+                double seconds = (DateTime.UtcNow - lastUtc).TotalSeconds;
+                if (seconds < 0) { return 0; }
+                if (seconds > int.MaxValue) { return int.MaxValue; }
+                return (int)seconds;
+            }
+            catch (Exception exc)
+            {
+                log.WriteError("GetLastServerDispatchSecondsAgo exception: {0}", exc);
+                return NO_SERVER_DISPATCH_YET;
+            }
+        }
+
+        /// <summary>
         /// This may be called on timer thread *OR* on external caller's thread
         /// </summary>
         private void SendAndReceiveCommands()
@@ -181,7 +211,11 @@ namespace ThwargFilter
             {
                 _status.TeamList = _cmdParser.GetTeamList();
                 _status.IsOnline = IsOnline();
-                _status.LastServerDispatchSecondsAgo = (int)(DateTime.UtcNow - FilterCore.GetLastServerDispatchUtc()).TotalSeconds;
+                _status.LastServerDispatchSecondsAgo = GetLastServerDispatchSecondsAgo();
+                _status.LoginStage = LoginStageTracker.GetStage();
+                _status.SecondsInStage = LoginStageTracker.GetSecondsInStage();
+                _status.RequestedCharacter = LoginStageTracker.GetRequestedCharacter();
+                _status.StatusNote = LoginStageTracker.GetStatusNote();
                 LaunchControl.RecordHeartbeatStatus(_gameToLauncherFilepath, _status);
             }
             catch (Exception exc)

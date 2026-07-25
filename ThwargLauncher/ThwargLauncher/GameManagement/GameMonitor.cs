@@ -561,8 +561,20 @@ namespace ThwargLauncher
         {
             gameSession.ProcessStatusFilepath = filepath;
             if (!response.IsValid) { return; }
-            gameSession.AccountName = response.Status.AccountName;
-            gameSession.ServerName = response.Status.ServerName;
+            // Never let an early, still-nameless heartbeat blank out identity we already
+            // have. The server/account key of an established session must stay stable,
+            // and a null AccountName is read elsewhere as the "brand new game" sentinel.
+            if (!string.IsNullOrEmpty(response.Status.AccountName))
+            {
+                gameSession.AccountName = response.Status.AccountName;
+            }
+            if (!string.IsNullOrEmpty(response.Status.ServerName))
+            {
+                gameSession.ServerName = response.Status.ServerName;
+            }
+            // CharacterName is deliberately NOT guarded: it legitimately goes empty when a
+            // character logs out back to character select, and it is not part of the
+            // server+account session key, so clearing it stays correct.
             gameSession.CharacterName = response.Status.CharacterName;
             if (gameSession.ProcessId != response.Status.ProcessId)
             {
@@ -688,6 +700,18 @@ namespace ThwargLauncher
             var response = ThwargFilter.LaunchControl.GetHeartbeatStatus(filepath);
             if (response.IsValid)
             {
+                // The filter now starts its heartbeat at startup, before it can know which
+                // server and account it belongs to, so the earliest heartbeats have empty
+                // names. Sessions are indexed BY server+account, so adopting a nameless
+                // heartbeat would register a phantom session under the key ":" that is
+                // never re-keyed when the real names arrive, permanently detaching the
+                // running game from its launch session. Skip until identity is known; the
+                // next sweep picks it up once the login flow has populated the names.
+                if (string.IsNullOrEmpty(response.Status.ServerName)
+                    || string.IsNullOrEmpty(response.Status.AccountName))
+                {
+                    return;
+                }
                 var gameSession = _map.GetGameSessionByServerAccount(response.Status.ServerName, response.Status.AccountName);
                 bool newGame = false;
                 if (gameSession == null)

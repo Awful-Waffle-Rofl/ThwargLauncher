@@ -74,6 +74,23 @@ namespace ThwargFilter
             {
                 log.WriteError("Failed to subscribe chat box capture, continuing without it: {0}", ex);
             }
+
+            // Start the heartbeat now rather than waiting for the login flow to start it.
+            // A client that stalls at "Connecting" never reaches the login managers, so
+            // without this it produces no game_<pid>.txt at all and a test harness is
+            // blind exactly when it most needs to see something. LaunchHeartbeat is
+            // idempotent, so the existing lazy calls in the login flow stay as they are.
+            // Guarded for the same reason as the subscribe above: telemetry must never
+            // be able to abort Startup and take the core filter down with it.
+            try
+            {
+                LoginStageTracker.SetStage(LoginStageTracker.STAGE_Starting);
+                Heartbeat.LaunchHeartbeat();
+            }
+            catch (Exception ex)
+            {
+                log.WriteError("Failed to start heartbeat at startup, continuing: {0}", ex);
+            }
         }
 
         public static DateTime GetLastServerDispatchUtc()
