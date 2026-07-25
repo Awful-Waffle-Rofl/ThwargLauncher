@@ -108,6 +108,7 @@
     <Compile Include="DefaultFirstCharacterLoader.cs" />
     <Compile Include="Shared\Debug.cs" />
     <Compile Include="Shared\DecalProxy.cs" />
+    <Compile Include="Shared\NamedKeys.cs" />
     <Compile Include="Shared\PostMessageTools.cs" />
     <Compile Include="Shared\PostMsgs.cs" />
     <Compile Include="Shared\Settings\Setting.cs" />

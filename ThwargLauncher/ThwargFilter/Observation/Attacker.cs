@@ -24,9 +24,16 @@ namespace ThwargFilter
     /// are the inbound callback interface Decal calls ON filters, not a send path).
     ///
     /// So attacking is driven the only way left: select the target, set combat mode, and
-    /// synthesize the client's own attack input. See ATTACK RELIABILITY below and the
-    /// TESTING_CHANNEL.md caveats. The parts that are real API calls (resolve, select,
-    /// combat mode) are reliable; only the final input step is synthetic.
+    /// post the client's own attack key.
+    ///
+    /// THE RECIPE IS LIVE-VERIFIED (batch 5, against a target dummy, melee and missile):
+    /// after SelectItem and SetCombatMode, post WM_KEYDOWN vk=VK_END(0x23) with
+    /// lParam=0x014F0001, hold about 200ms, then WM_KEYUP with lParam=0xC14F0001. Note the
+    /// extended-key bit: End is an extended key, and a lParam without it does nothing.
+    ///
+    /// ONE TAP IS ENOUGH. The tap starts the client's own repeating attack loop; it does
+    /// not need to be held down continuously. A second tap does NOT stop it either, so
+    /// attackstop (peace mode) is the only way to stop attacking.
     ///
     /// THREADING: same one-shot RenderFrame marshalling as Appraiser and GameStateDumper.
     /// </summary>
@@ -43,6 +50,11 @@ namespace ThwargFilter
         private const string SETTING_AttackKey = "AttackKey";
         private const string SETTING_AttackMethod = "AttackMethod";
         private const string SETTING_AttackCombatMode = "AttackCombatMode";
+        private const string SETTING_AttackKeyHoldMs = "AttackKeyHoldMs";
+
+        // The live-verified defaults. Changing these changes a proven path.
+        private const string DEFAULT_AttackKey = "End";
+        private const int DEFAULT_AttackKeyHoldMs = 200;
 
         private const string METHOD_Key = "key";
         private const string METHOD_UseItem = "useitem";
@@ -54,9 +66,12 @@ namespace ThwargFilter
         private bool _subscribed;
 
         // What we are currently holding down, so attackstop can release exactly that key
-        // even if the setting changes between attack and attackstop.
+        // even if the setting changes between attack and attackstop. The release is done
+        // on a later render frame rather than by sleeping: this runs on the GAME thread,
+        // and blocking it for the hold duration would stall rendering.
         private bool _keyHeld;
-        private char _heldKey;
+        private NamedKey _heldKey;
+        private DateTime _releaseDeadlineUtc = DateTime.MaxValue;
 
         /// <summary>
         /// Thread safe. Queues an attack on the next rendered frame.
@@ -116,6 +131,7 @@ namespace ThwargFilter
                 string target = null;
                 bool haveTarget = false;
                 bool doStop = false;
+                bool doRelease = false;
                 lock (_locker)
                 {
                     // A stop always wins over queued attacks: "attackstop" must mean stop,
@@ -126,18 +142,28 @@ namespace ThwargFilter
                         doStop = true;
                         _pendingTargets.Clear();
                     }
-                    else if (_pendingTargets.Count > 0)
+                    else if (_keyHeld && DateTime.UtcNow >= _releaseDeadlineUtc)
+                    {
+                        // The hold elapsed. Release before starting anything else, so two
+                        // queued attacks cannot overlap their keypresses.
+                        doRelease = true;
+                    }
+                    else if (!_keyHeld && _pendingTargets.Count > 0)
                     {
                         target = _pendingTargets.Dequeue();
                         haveTarget = true;
                     }
-                    if (_pendingTargets.Count == 0 && !_stopPending && _subscribed)
+                    // Stay subscribed while anything is outstanding, INCLUDING a key we
+                    // still owe a release for.
+                    if (_pendingTargets.Count == 0 && !_stopPending && !_keyHeld
+                        && !doStop && !doRelease && !haveTarget && _subscribed)
                     {
                         CoreManager.Current.RenderFrame -= new EventHandler<EventArgs>(Current_RenderFrame);
                         _subscribed = false;
                     }
                 }
                 if (doStop) { DoStop(); }
+                else if (doRelease) { ReleaseAttackKey(); }
                 else if (haveTarget) { DoAttack(target); }
             }
             catch (Exception exc)
@@ -240,7 +266,7 @@ namespace ThwargFilter
             }
             if (method == METHOD_Key || method == METHOD_Both)
             {
-                HoldAttackKey();
+                TapAttackKey();
             }
             if (method != METHOD_Key && method != METHOD_UseItem && method != METHOD_Both)
             {
@@ -250,47 +276,52 @@ namespace ThwargFilter
             }
         }
 
-        private void HoldAttackKey()
+        /// <summary>
+        /// Post the attack key down and schedule its release. One tap starts the client's
+        /// repeating attack loop, so this is a tap, not a sustained hold. The release runs
+        /// from a later render frame; sleeping here would block the game thread.
+        /// </summary>
+        private void TapAttackKey()
         {
-            char key = GetAttackKey();
+            NamedKey key = GetAttackKey();
             try
             {
-                // Released by attackstop. The AC client attacks while the input is held,
-                // so this is deliberately a down without a matching up.
                 ReleaseAttackKey();
-                PostMessageTools.SendKeyDown(key);
+                PostMessageTools.SendNamedKeyDown(key);
                 lock (_locker)
                 {
                     _keyHeld = true;
                     _heldKey = key;
+                    _releaseDeadlineUtc = DateTime.UtcNow.AddMilliseconds(GetAttackKeyHoldMs());
                 }
-                log.WriteInfo("attack: holding attack key '{0}'; use attackstop to release", key);
+                log.WriteInfo("attack: posted key down {0}", key);
             }
             catch (Exception exc)
             {
-                log.WriteError("attack: could not post attack key '{0}': {1}", key, exc);
+                log.WriteError("attack: could not post attack key {0}: {1}", key, exc);
             }
         }
 
         private void ReleaseAttackKey()
         {
             bool held;
-            char key;
+            NamedKey key;
             lock (_locker)
             {
                 held = _keyHeld;
                 key = _heldKey;
                 _keyHeld = false;
+                _releaseDeadlineUtc = DateTime.MaxValue;
             }
-            if (!held) { return; }
+            if (!held || key == null) { return; }
             try
             {
-                PostMessageTools.SendKeyUp(key);
-                log.WriteInfo("attack: released attack key '{0}'", key);
+                PostMessageTools.SendNamedKeyUp(key);
+                log.WriteInfo("attack: posted key up {0}", key);
             }
             catch (Exception exc)
             {
-                log.WriteError("attack: could not release attack key '{0}': {1}", key, exc);
+                log.WriteError("attack: could not release attack key {0}: {1}", key, exc);
             }
         }
 
@@ -329,11 +360,29 @@ namespace ThwargFilter
             return CombatState.Melee;
         }
 
-        private char GetAttackKey()
+        /// <summary>
+        /// The attack key by NAME, not by character. A character cannot express End or the
+        /// other navigation keys at all (see NamedKeys), which is why the old char setting
+        /// could never have worked.
+        /// </summary>
+        private NamedKey GetAttackKey()
         {
-            string text = GetSetting(SETTING_AttackKey, "a");
-            if (string.IsNullOrEmpty(text)) { return 'a'; }
-            return text[0];
+            string text = GetSetting(SETTING_AttackKey, DEFAULT_AttackKey);
+            NamedKey key = NamedKeys.Find(text);
+            if (key != null) { return key; }
+            log.WriteError(
+                "attack: unrecognized {0} '{1}'; expected one of [{2}]. Falling back to {3}.",
+                SETTING_AttackKey, text, NamedKeys.GetKnownNames(), DEFAULT_AttackKey);
+            return NamedKeys.Find(DEFAULT_AttackKey);
+        }
+
+        private int GetAttackKeyHoldMs()
+        {
+            string text = GetSetting(SETTING_AttackKeyHoldMs, DEFAULT_AttackKeyHoldMs.ToString());
+            int value = DEFAULT_AttackKeyHoldMs;
+            if (!int.TryParse(text, out value)) { return DEFAULT_AttackKeyHoldMs; }
+            if (value < 1 || value > 5000) { return DEFAULT_AttackKeyHoldMs; }
+            return value;
         }
 
         private static string GetSetting(string key, string defaultValue)

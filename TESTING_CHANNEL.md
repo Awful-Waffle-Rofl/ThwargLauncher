@@ -580,46 +580,123 @@ So `attack` does the only thing left:
 3. `Actions.SetCombatMode(...)` (real API, reliable)
 4. **synthesize the client's attack input** (not an API; see below)
 
-Steps 1 to 3 are ordinary Decal calls. Step 4 is the weak link.
+Steps 1 to 3 are ordinary Decal calls. Step 4 is synthetic input, but it is no longer
+guesswork: the exact recipe below is live-verified.
 
 **`outcome:"requested"` therefore means "input was issued", NOT "the character is
 confirmed to be swinging."** Verify the effect by other means: the target's health
 dropping, combat chat in `chatlog_<pid>.jsonl`, or a `dumpstate` vitals read.
 
-### Tuning step 4 without a rebuild
+### Step 4: the verified attack recipe
 
-Because the correct input cannot be determined from the assemblies alone, it is
-configurable through the filter's settings, and every choice is logged:
+Live-verified against a target dummy, in melee and in missile mode. After the select and
+combat-mode steps, post to the client window:
+
+```
+WM_KEYDOWN  wParam = VK_END (0x23)   lParam = 0x014F0001
+   ... hold about 200 ms ...
+WM_KEYUP    wParam = VK_END (0x23)   lParam = 0xC14F0001
+```
+
+Two things about that lParam matter, and both were wrong in the first version of this verb:
+
+* **The extended-key bit (bit 24) must be set.** End is an extended key. `0x014F0001` is
+  repeat count 1, scan code `0x4F` in bits 16-23, extended bit set. Key up is the same
+  value with bits 30 and 31 added, hence `0xC14F0001`.
+* **The key cannot be expressed as a character.** `PostMsgs.CharCode()` / `ScanCode()` map
+  only `a-z`, `/` and space and fall through to `0x20` for everything else, and never set
+  the extended bit. The old character-typed `AttackKey` setting was therefore
+  unreachable-by-construction for End, Delete and the rest. Keys are now selected by
+  **name** against a table that carries the scan code and extended flag.
+
+**One tap is enough.** The tap starts the client's own repeating attack loop; it does not
+need to be held down. A second tap does **not** stop it. `attackstop` (peace mode) is the
+only way to stop attacking.
+
+### Settings
 
 | setting | default | meaning |
 | --- | --- | --- |
-| `AttackMethod` | `key` | `key` posts a held keypress, `useitem` calls `Actions.UseItem(target, 0)`, `both` does both |
-| `AttackKey` | `a` | the character posted when `AttackMethod` includes `key` |
+| `AttackKey` | `End` | key **name** from the vocabulary below |
+| `AttackKeyHoldMs` | `200` | milliseconds between the key down and key up of the tap |
 | `AttackCombatMode` | `Melee` | `Melee`, `Missile` or `Magic`, passed to `SetCombatMode` |
+| `AttackMethod` | `key` | `key` posts the tap, `useitem` calls `Actions.UseItem(target, 0)`, `both` |
 
-**The `AttackKey` default of `a` is a placeholder and has not been confirmed against the
-client's keybindings.** Confirm it in game and set it accordingly. `AttackMethod` exists so
-a live tester can try the alternative path without waiting for a new build.
+The defaults are the verified recipe. `AttackMethod=useitem` is retained only as a
+fallback; it is not the proven path. An unrecognized `AttackKey` logs an error listing the
+valid names and falls back to `End` rather than posting something arbitrary.
 
-The keypress is deliberately sent as a **key down that is held**, because the AC client
-attacks for as long as the attack input is held. `attackstop` releases it and sets
-`CombatState.Peace`. A rig that issues `attack` and never issues `attackstop` leaves the
-client believing a key is still down.
+### Native key vocabulary
 
-Reliability caveats for the synthetic input:
+These are the AC combat keys, as bound in the client keymap.
 
-* It is `PostMessage` to the game window, so it depends on the window existing and the
-  client honouring posted input. A minimized or input-blocked client may ignore it.
-* It cannot be confirmed. Nothing reports back that the client acted on the keypress.
-* It is keyboard-layout and keybinding dependent, unlike steps 1 to 3.
+| name | vk | scan | extended | what it does in game |
+| --- | --- | --- | --- | --- |
+| `End` | `0x23` | `0x4F` | yes | attack low / missile aim low / cast current spell |
+| `Delete` | `0x2E` | `0x53` | yes | attack high / missile aim high |
+| `PageDown` | `0x22` | `0x51` | yes | attack medium / missile aim medium |
+| `Insert` | `0x2D` | `0x52` | yes | attack bar step down |
+| `PageUp` | `0x21` | `0x49` | yes | attack bar step up |
+| `Apostrophe` | `0xDE` | `0x28` | no | select closest monster |
+| `Backtick` | `0xC0` | `0x29` | no | toggle combat mode |
+
+The three attack-height keys double as **missile aim heights** in missile mode. The two bar
+keys read as **power and speed** in melee and as **accuracy** in missile. The keymap also
+binds `DIK_END` to `CombatCastCurrentSpell` in MagicCombat mode, so the same End tap should
+fire casting once a spell is selected.
+
+Aliases `PgDn`, `PgUp`, `Del`, `Ins`, `Grave` and `Quote` are accepted.
+
+**Verification status:** only the `End` row is live-verified. The others are derived from
+the same standard PS/2 set 1 scan-code table and share End's shape, so they are high
+confidence but not individually proven.
+
+### The keymap is the authoritative binding source
+
+Which key does what is the player's own binding, not a constant. The authoritative file is:
+
+```
+C:\Users\danie\OneDrive\Documents\Asheron's Call\acclient.keymap
+```
+
+**DIK vs VK caveat:** that file records bindings as **DIK** (DirectInput) scan codes, not
+virtual key codes. `DIK_END` is `0xCF`, which is the base make code `0x4F` with
+DirectInput's extended marker `0x80` added. The table above splits that into the scan code
+and the extended flag that a `WM_KEYDOWN` lParam actually wants. So: read the keymap for
+**which** key is bound to a combat action, and read the table above for **how** to post it.
+
+### Remaining caveats
+
+* Posted input cannot be confirmed. Nothing reports back that the client acted on it, so
+  `outcome:"requested"` still means "input was issued", not "the character is swinging".
+  Verify by target health, combat chat, or a `dumpstate` vitals read.
+* It is `PostMessage` to the game window, so a minimized or input-blocked client may
+  ignore it.
+* Bindings are per-player. If the keymap differs from the table, set `AttackKey`
+  accordingly.
+
+### Stopping, and stop latency
+
+`attackstop` releases any key still held and sets `CombatState.Peace`.
+
+Inside the filter, stop is handled on the **next render frame** (order of milliseconds):
+the stop flag is checked before queued attacks, and it clears the attack queue, so it can
+never be stuck behind a backlog. The dominant latency is the **launcher channel**, not the
+filter: inbound commands are picked up by a `FileSystemWatcher` (near instant) or the 3
+second heartbeat timer as fallback. A harness that writes `incmds_<pid>.txt` gets the
+watcher path.
+
+Batch 5 saw one `attackstop` appear to lag about 13 seconds in an ambiguous case, but a
+controlled retest stopped within one swing. If a slow stop recurs, check first whether the
+`attack` that preceded it actually resolved: an ambiguous or not-found `attack` never
+started anything, so what looks like a slow stop may be an attack that never began.
 
 ### Missile
 
-Missile combat needs no separate call: `SetCombatMode` takes `CombatState.Missile` through
-the same code path, so setting `AttackCombatMode=Missile` covers it. What is **not**
-verified is whether the same held-key input fires a bow the way it swings a melee weapon.
-Multishot testing will need that confirmed in game, and a bow equipped first: nothing here
-wields anything, so equip before `attack`.
+Missile needs no separate call: `SetCombatMode` takes `CombatState.Missile` through the
+same path, and the attack-height keys are the missile aim heights, so the same End tap is
+verified to work in missile mode. A bow must be equipped first, because nothing here
+wields anything.
 
 ---
 
@@ -677,13 +754,24 @@ In rough order of preference:
 2. **Use the filter's own verbs.** `dumpstate` (section 3) already covers position,
    vitals and nearby objects, which is most of what `/ub pos` and friends were being used
    for, and it lands in a structured file rather than a chat line.
-3. **Run the rig without VCS.** Per the connector above, when VCS is *not* running the
-   same plugins fall back to `Actions.AddChatTextRaw`, which does go through the client
-   chat window. Removing or disabling VCS5 on the test client should therefore make plugin
-   output visible on `source:"chatbox"`. This follows from the connector source and is
-   **not yet confirmed in game**; confirm before relying on it, and note it only holds for
-   plugins that use this standard connector.
+3. **Running the rig without VCS: UNVERIFIED, and observed failing.** Per the connector
+   above, when VCS is *not* running the same plugins fall back to
+   `Actions.AddChatTextRaw`, so in theory the text reaches the client chat window and
+   becomes visible on `source:"chatbox"`.
+
+   **Batch 5 contradicts this.** Plugin text was observed drawn in the client's own chat
+   window and still did not appear in capture. So either `AddChatTextRaw` does not raise
+   `ChatBoxMessage` (plausible: it is the client adding text to itself, not text arriving
+   through the path Decal intercepts), or those plugins do not use this connector, or VCS
+   was still active in that configuration. The cause was not isolated.
+
+   Treat this as a lead, not a workaround. Do not build a rig on it.
 
 What will **not** work, so nobody spends time on it: subscribing to VCS5 (no events),
 scraping VCS windows (rendering only, no text model exposed), or reflecting into VCS5
 internals (obfuscated and unstable).
+
+**The reliable rule is server-routed probes only.** Anything that must be asserted on has
+to come from the server (`source:"network"`) or from this filter's own verbs, which write
+structured records. Plugin chat output is not a supported observation channel, in any
+configuration, until somebody proves otherwise in game.

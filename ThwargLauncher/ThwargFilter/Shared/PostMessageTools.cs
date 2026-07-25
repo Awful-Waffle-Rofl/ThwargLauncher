@@ -53,6 +53,16 @@ namespace Filter.Shared
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 25);
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 31);
         }
+        /// <summary>Press a named key in the game window. Pair with SendNamedKeyUp.</summary>
+        public static void SendNamedKeyDown(NamedKey key)
+        {
+            PostMsgs.SendNamedKeyDown(CoreManager.Current.Decal.Hwnd, key);
+        }
+        /// <summary>Release a named key previously pressed with SendNamedKeyDown.</summary>
+        public static void SendNamedKeyUp(NamedKey key)
+        {
+            PostMsgs.SendNamedKeyUp(CoreManager.Current.Decal.Hwnd, key);
+        }
         /// <summary>Press and hold a key in the game window. Pair with SendKeyUp.</summary>
         public static void SendKeyDown(char ch)
         {
