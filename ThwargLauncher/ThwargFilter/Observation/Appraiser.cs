@@ -33,6 +33,12 @@ namespace ThwargFilter
     {
         /// <summary>Bare "appraise", or "appraise self", targets the logged in character.</summary>
         public const string TARGET_Self = "self";
+
+        // Outcomes emitted into chatlog_<pid>.jsonl so a harness can await the result
+        // without parsing the filter log.
+        private const string OUTCOME_Requested = "requested";
+        private const string OUTCOME_Ambiguous = "ambiguous";
+        private const string OUTCOME_NotFound = "notfound";
         // Keep candidate listings bounded: this goes to the log on every ambiguous match.
         private const int MAX_LOGGED_CANDIDATES = 20;
 
@@ -126,23 +132,32 @@ namespace ThwargFilter
         private void AppraiseSelf()
         {
             int characterId = 0;
+            string characterName = null;
             try
             {
                 characterId = CoreManager.Current.CharacterFilter.Id;
+                characterName = CoreManager.Current.CharacterFilter.Name;
             }
             catch (Exception exc)
             {
                 log.WriteError("appraise self: cannot read character id: {0}", exc);
+                WriteResult(TARGET_Self, OUTCOME_NotFound, 0, null, 0);
                 return;
             }
             if (characterId == 0)
             {
                 log.WriteInfo("appraise self: no character id yet; not logged in");
+                WriteResult(TARGET_Self, OUTCOME_NotFound, 0, null, 0);
                 return;
             }
             if (SendRequestId(characterId))
             {
                 log.WriteInfo("appraise self: requested id for character {0}", characterId);
+                WriteResult(TARGET_Self, OUTCOME_Requested, characterId, characterName, 1);
+            }
+            else
+            {
+                WriteResult(TARGET_Self, OUTCOME_NotFound, 0, null, 0);
             }
         }
 
@@ -152,6 +167,7 @@ namespace ThwargFilter
             if (candidates == null)
             {
                 log.WriteError("appraise '{0}': could not read the world object list", target);
+                WriteResult(target, OUTCOME_NotFound, 0, null, 0);
                 return;
             }
             if (candidates.Count == 1)
@@ -160,6 +176,11 @@ namespace ThwargFilter
                 if (SendRequestId(match.Id))
                 {
                     log.WriteInfo("appraise '{0}': matched {1}", target, match.Describe());
+                    WriteResult(target, OUTCOME_Requested, match.Id, match.Name, 1);
+                }
+                else
+                {
+                    WriteResult(target, OUTCOME_NotFound, 0, null, 1);
                 }
                 return;
             }
@@ -168,6 +189,7 @@ namespace ThwargFilter
             if (candidates.Count == 0)
             {
                 log.WriteInfo("appraise '{0}': no match; nothing appraised", target);
+                WriteResult(target, OUTCOME_NotFound, 0, null, 0);
             }
             else
             {
@@ -175,6 +197,7 @@ namespace ThwargFilter
                     "appraise '{0}': ambiguous, {1} matches; nothing appraised. Narrow the substring.",
                     target,
                     candidates.Count);
+                WriteResult(target, OUTCOME_Ambiguous, 0, null, candidates.Count);
             }
             LogCandidates(candidates);
         }
@@ -276,6 +299,48 @@ namespace ThwargFilter
         private static int CompareByDistance(AppraiseCandidate left, AppraiseCandidate right)
         {
             return left.Distance.CompareTo(right.Distance);
+        }
+
+        /// <summary>
+        /// Emit one machine-readable record into chatlog_[pid].jsonl so a harness can await
+        /// the outcome of an appraise without tailing the filter log. The human readable
+        /// log lines are kept as well; this is in addition to them, not instead.
+        ///
+        /// Deliberately NOT routed through LoginStageTracker.StatusNote: that field is
+        /// documented as login stall diagnosis and self clears on stage change, so
+        /// overloading it would corrupt the login decision table.
+        /// </summary>
+        private static void WriteResult(
+            string target,
+            string outcome,
+            int resolvedId,
+            string resolvedName,
+            int candidateCount)
+        {
+            try
+            {
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["utc"] = DateTime.UtcNow.ToString("o");
+                entry["source"] = "filter";
+                entry["type"] = "AppraiseResult";
+                entry["target"] = target;
+                entry["outcome"] = outcome;
+                if (outcome == OUTCOME_Requested)
+                {
+                    entry["resolvedId"] = resolvedId;
+                    entry["resolvedName"] = resolvedName;
+                }
+                if (outcome == OUTCOME_Ambiguous)
+                {
+                    entry["candidateCount"] = candidateCount;
+                }
+                ChatLogWriter.WriteEntry(entry);
+            }
+            catch (Exception exc)
+            {
+                // Reporting must never break the verb it is reporting on.
+                log.WriteError("Appraiser.WriteResult exception: {0}", exc);
+            }
         }
 
         private bool SendRequestId(int objectId)

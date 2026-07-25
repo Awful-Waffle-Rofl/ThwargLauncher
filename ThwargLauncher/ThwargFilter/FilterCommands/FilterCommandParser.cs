@@ -52,6 +52,10 @@ namespace ThwargFilter
         private const string CMD_SetWindowTitle = "swt ";
         private const string CMD_Inventory = "inventory";
         private const string CMD_Inventory2 = "inv";
+        // NOTE: this MUST be registered before CMD_Inventory and CMD_Inventory2, because
+        // command matching is longest-nothing prefix matching that breaks on the first hit:
+        // "/tf inventoryhook off" also starts with "/tf inventory" and "/tf inv".
+        private const string CMD_InventoryHook = "inventoryhook";
         private const string CMD_KillClient = "killclient";
         private const string CMD_KillClient2 = "kc";
         private const string CMD_KillAllClients = "killallclients";
@@ -101,6 +105,9 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_LeaveTeam2, LeaveTeamCommandHandler, null);
             cmdHandlers.Add(CMD_Test, TestCommandHandler, "Test submitting a command directly to game ('/tf test somecommandstring')");
             cmdHandlers.Add(CMD_SetWindowTitle, SetWindowTitleCommandHandler, "Set window title ('/tf swt MyGame')");
+            // Registered ahead of CMD_Inventory / CMD_Inventory2 on purpose: the matching
+            // loop breaks on the first prefix hit, and "inventoryhook" starts with both.
+            cmdHandlers.Add(CMD_InventoryHook, InventoryHookCommandHandler, "Turn the auto-identify-on-select hook on or off ('/tf inventoryhook off')");
             cmdHandlers.Add(CMD_Inventory, InventoryCommandHandler, "List inventory to log ('/tf inv')");
             cmdHandlers.Add(CMD_Inventory2, InventoryCommandHandler, null);
             cmdHandlers.Add(CMD_KillClient, KillClientCommandHandler, "Kill current client ('/tf kc')");
@@ -148,6 +155,13 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_Appraise, out commandString))
             {
                 AppraiseCommandHandler(commandString);
+            }
+            // Must precede any "inventory"/"inv" branch for the same prefix reason as the
+            // cmdHandlers registration order.
+            else if (IsCommandPrefix(command, CMD_InventoryHook, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_InventoryHook, out commandString))
+            {
+                InventoryHookCommandHandler(commandString);
             }
             else
             {
@@ -241,6 +255,34 @@ namespace ThwargFilter
         private void LeaveTeam(string team)
         {
             myTeams.Remove(team);
+        }
+        private void InventoryHookCommandHandler(string command)
+        {
+            if (_thwargInventory == null)
+            {
+                log.WriteError("inventoryhook requested but no ThwargInventory is wired up");
+                return;
+            }
+            string arg = (command == null ? "" : command.Trim());
+            if (arg.Length == 0)
+            {
+                log.WriteInfo(
+                    "inventoryhook is currently {0} (use 'inventoryhook on' or 'inventoryhook off')",
+                    (_thwargInventory.AutoIdentifyEnabled ? "ON" : "OFF"));
+                return;
+            }
+            if (string.Compare(arg, "on", StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                _thwargInventory.SetAutoIdentifyEnabled(true);
+            }
+            else if (string.Compare(arg, "off", StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                _thwargInventory.SetAutoIdentifyEnabled(false);
+            }
+            else
+            {
+                log.WriteError("inventoryhook: unrecognized argument '{0}'; expected 'on' or 'off'", arg);
+            }
         }
         private void InventoryCommandHandler(string command)
         {

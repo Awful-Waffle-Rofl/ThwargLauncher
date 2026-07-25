@@ -328,6 +328,8 @@ client-side state into a chat line you can assert on.
 | file paths | `ThwargLauncher\ThwargFilter\FileLocations.cs` |
 | `dumpstate` verb wiring | `ThwargLauncher\ThwargFilter\FilterCommands\FilterCommandParser.cs` |
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
+| `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
+| smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
 | command file format | `ThwargLauncher\ThwargFilter\Channels\` |
 
@@ -444,8 +446,36 @@ Matching rules for the substring form:
 The ambiguous case deliberately does **not** guess. Picking one arbitrarily would silently
 aim the next admin command at the wrong object, which is worse than doing nothing.
 
-Results go to the filter log, whose path is published in the heartbeat as `LogFilepath`
-(see section 1). Sample lines:
+### Result record (machine readable)
+
+Every appraise emits one line into `chatlog_<pid>.jsonl` (see section 4), so a harness can
+await the outcome without tailing the filter log:
+
+| field | meaning |
+| --- | --- |
+| `source` | always `"filter"` (not `"network"` or `"chatbox"`) |
+| `type` | always `"AppraiseResult"` |
+| `target` | the argument as given, or `"self"` |
+| `outcome` | `"requested"`, `"ambiguous"` or `"notfound"` |
+| `resolvedId` | the appraised object id, **only** when `outcome` is `"requested"` |
+| `resolvedName` | the appraised object name, **only** when `outcome` is `"requested"` |
+| `candidateCount` | how many objects matched, **only** when `outcome` is `"ambiguous"` |
+
+```json
+{"utc":"2026-07-25T18:42:52.5296132Z","source":"filter","type":"AppraiseResult","target":"self","outcome":"requested","resolvedId":1342177281,"resolvedName":"Cray","seq":1}
+{"utc":"2026-07-25T18:42:52.5766398Z","source":"filter","type":"AppraiseResult","target":"drudge","outcome":"ambiguous","candidateCount":3,"seq":2}
+{"utc":"2026-07-25T18:42:52.5766398Z","source":"filter","type":"AppraiseResult","target":"nosuch","outcome":"notfound","seq":3}
+```
+
+Note that `outcome:"requested"` means the identify request was **sent**, not that the
+server has answered. It is the signal that the verb resolved a target, not a confirmation
+of appraisal. Allow a beat before the admin command that depends on it.
+
+The human readable log lines below are still written as well; the JSONL record is in
+addition to them, not instead.
+
+Results also go to the filter log, whose path is published in the heartbeat as
+`LogFilepath` (see section 1). Sample lines:
 
 ```
 Appraiser: appraise requested for 'drudge'
@@ -470,13 +500,39 @@ hovering inventory items mid-test re-points the server's last-appraised object a
 item, and a subsequent `/remove-vitae` or `/heal` aims at that item instead of your intended
 target.
 
-Practical rules:
+### Suppressing the drift: the `inventoryhook` verb
+
+The auto-identify can be turned off, so a rig can pin the server's appraisal target.
+
+| command | effect |
+| --- | --- |
+| `inventoryhook off` | suppress the auto-identify on item selection |
+| `inventoryhook on` | restore it |
+| `inventoryhook` | report the current state without changing it |
+
+`on` is the **default**, so behaviour is unchanged unless a rig opts out. The argument is
+case insensitive, an unrecognized argument changes nothing and logs an error, and every
+state change is logged.
+
+While suppressed, selected items are also not recorded as seen, so turning the hook back on
+resumes normal behaviour cleanly rather than leaving a gap where items are permanently
+treated as already identified.
+
+### Recommended rig pattern
+
+```
+inventoryhook off          <- at rig start, pin the appraisal target
+appraise <target>          <- await the AppraiseResult record
+<admin command>            <- /remove-vitae, /heal, ...
+inventoryhook on           <- at cleanup, restore default behaviour
+```
+
+Remaining rules even with the hook off:
 
 * Issue `appraise` as late as possible, immediately before the admin command that consumes
   it.
-* Do not touch inventory between the `appraise` and the command.
 * If a target-sensitive admin command behaves as though it hit the wrong thing, suspect
   drift first and re-issue `appraise`.
-
-This auto-identify is pre-existing filter behaviour and is deliberately left alone here.
-Making it suppressible is a possible follow-up if it keeps interfering.
+* Restore `inventoryhook on` at cleanup. The setting is per game process and lives only in
+  memory, so it resets on client restart, but leaving it off will confuse the next person
+  to use that client interactively.
