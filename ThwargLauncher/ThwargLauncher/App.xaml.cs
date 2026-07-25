@@ -16,6 +16,19 @@ namespace ThwargLauncher
             base.OnStartup(e);
             AppDomain.CurrentDomain.UnhandledException += (sender, eargs)
                 => HandleExcObject(eargs.ExceptionObject);
+
+            // Headless command-line verbs run without the WPF UI and then exit.
+            // e.Args excludes the exe path; the verb is the first non-switch token.
+            if (e.Args.Length > 0 &&
+                string.Equals(e.Args[0], CommandLine.HeadlessLauncher.Verb, StringComparison.OrdinalIgnoreCase))
+            {
+                var verbArgs = new string[e.Args.Length - 1];
+                Array.Copy(e.Args, 1, verbArgs, 0, verbArgs.Length);
+                int exitCode = CommandLine.HeadlessLauncher.Run(verbArgs);
+                Shutdown(exitCode);
+                return;
+            }
+
             AppCoordinator appcoord = new AppCoordinator();
         }
         void HandleExcObject(object excObj)

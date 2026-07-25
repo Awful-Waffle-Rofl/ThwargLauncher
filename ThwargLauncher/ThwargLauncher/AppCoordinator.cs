@@ -144,6 +144,10 @@ namespace ThwargLauncher
                 {
                     var value = parser.GetValue("AutoLaunchOnStart");
                     _autoLaunchOnStart = PersistenceHelper.AppSettings.ObjToBool(value, false);
+                    // MainWindow reads this from Settings.Default, so persist it like the
+                    // other command-line switches above (previously this flag was a no-op).
+                    Properties.Settings.Default.AutoLaunchOnStart = _autoLaunchOnStart;
+                    Properties.Settings.Default.Save();
                 }
             }
             catch (Exception exc)
