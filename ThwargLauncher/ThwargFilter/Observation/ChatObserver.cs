@@ -121,7 +121,7 @@ namespace ThwargFilter
         /// ACE GameMessageHearSpeech (0x02BB) and GameMessageHearRangedSpeech (0x02BC).
         /// ACE writes: string messageText, string senderName, uint senderID,
         /// [float range for ranged], uint chatMessageType
-        /// (GameMessageHearSpeech.cs:24-27, GameMessageHearRangedSpeech.cs:40-44).
+        /// (GameMessageHearSpeech.cs:10-13, GameMessageHearRangedSpeech.cs:10-14).
         /// Decal names those fields text / senderName / sender / range / type.
         /// </summary>
         private void RecordHearSpeech(Message msg, string eventName, int opcode, bool ranged)
@@ -141,7 +141,7 @@ namespace ThwargFilter
         /// <summary>
         /// ACE GameMessageEmoteText (0x01E0) and GameMessageSoulEmote (0x01E2).
         /// ACE writes: uint senderId, string senderName, string emoteText
-        /// (GameMessageEmoteText.cs:55-57, GameMessageSoulEmote.cs same shape).
+        /// (GameMessageEmoteText.cs:8-10, GameMessageSoulEmote.cs:8-10).
         /// Decal names those fields sender / senderName / text.
         /// </summary>
         private void RecordEmote(Message msg, string eventName, int opcode)
