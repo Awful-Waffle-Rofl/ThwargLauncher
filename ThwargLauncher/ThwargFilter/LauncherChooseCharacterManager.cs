@@ -79,6 +79,9 @@ namespace ThwargFilter
                 var launchInfo = LaunchControl.GetLaunchInfo();
                 if (launchInfo.IsValid)
                 {
+                    // Publish what the launcher asked for as soon as we know it, so a
+                    // stalled client reports the requested name even before we try it.
+                    LoginStageTracker.SetRequestedCharacter(launchInfo.CharacterName);
                     TimeSpan FiveMinutes = new TimeSpan(0, 0, 5, 0);
                     if (DateTime.UtcNow - launchInfo.LaunchTime < FiveMinutes)
                     {

@@ -25,6 +25,9 @@ namespace ThwargFilter
             {
                 freshLogin = false;
 
+                // Character materialize after a fresh login: we are actually in the world.
+                LoginStageTracker.SetStage(LoginStageTracker.STAGE_InWorld);
+
                 string characterName = GameRepo.Game.Character;
                 if (string.IsNullOrEmpty(characterName))
                 {

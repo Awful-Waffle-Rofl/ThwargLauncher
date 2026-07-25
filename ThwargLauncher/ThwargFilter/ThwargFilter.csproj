@@ -94,6 +94,7 @@
     <Compile Include="Observation\ChatLogWriter.cs" />
     <Compile Include="Observation\ChatObserver.cs" />
     <Compile Include="Observation\GameStateDumper.cs" />
+    <Compile Include="Observation\LoginStageTracker.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="ProxyDomain.cs" />
     <Compile Include="ServerCharacterListByAccount.cs" />
