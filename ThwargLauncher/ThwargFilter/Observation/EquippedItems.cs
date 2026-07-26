@@ -18,6 +18,12 @@ namespace ThwargFilter
         public bool Wielded;
         /// <summary>True when the item carries a Coverage mask (worn armour or clothing).</summary>
         public bool Worn;
+        /// <summary>LongValueKey.Type, which is the weenie class id (wcid), or 0.</summary>
+        public int Wcid;
+        /// <summary>LongValueKey.StackCount, or 0 when the item does not stack.</summary>
+        public int StackCount;
+        /// <summary>The container this item sits in, or 0 when it is equipped.</summary>
+        public int Container;
 
         public string Describe()
         {
@@ -84,8 +90,13 @@ namespace ThwargFilter
                     item.ObjectClass = SafeObjectClass(wo);
                     item.Wielded = wielded;
                     item.Worn = (!wielded && hasCoverage);
+                    item.Container = container;
                     int slot = 0;
                     if (TryGetLong(wo, LongValueKey.WieldingSlot, out slot)) { item.WieldingSlot = slot; }
+                    int wcid = 0;
+                    if (TryGetLong(wo, LongValueKey.Type, out wcid)) { item.Wcid = wcid; }
+                    int stack = 0;
+                    if (TryGetLong(wo, LongValueKey.StackCount, out stack)) { item.StackCount = stack; }
                     found.Add(item);
                 }
                 return found;
@@ -95,6 +106,95 @@ namespace ThwargFilter
                 log.WriteError("EquippedItems.Read exception: {0}", exc);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Pack contents: everything carried that sits INSIDE a container, the complement
+        /// of the equipped set. GetInventory() covers nested packs, so this is the full
+        /// carried set. Returns null when the world data cannot be read at all.
+        /// </summary>
+        public static List<EquippedItem> ReadCarried(int playerId)
+        {
+            List<EquippedItem> found = new List<EquippedItem>();
+            try
+            {
+                WorldFilter worldFilter = CoreManager.Current.WorldFilter;
+                if (worldFilter == null) { return null; }
+                WorldObjectCollection carried = worldFilter.GetInventory();
+                if (carried == null) { return null; }
+
+                foreach (WorldObject wo in carried)
+                {
+                    if (wo == null) { continue; }
+                    int container = 0;
+                    bool hasContainer = TryGetLong(wo, LongValueKey.Container, out container) && container != 0;
+                    if (!hasContainer) { continue; }
+
+                    EquippedItem item = new EquippedItem();
+                    item.Id = SafeId(wo);
+                    if (item.Id == 0) { continue; }
+                    item.Name = SafeName(wo);
+                    item.ObjectClass = SafeObjectClass(wo);
+                    item.Container = container;
+                    int wcid = 0;
+                    if (TryGetLong(wo, LongValueKey.Type, out wcid)) { item.Wcid = wcid; }
+                    int stack = 0;
+                    if (TryGetLong(wo, LongValueKey.StackCount, out stack)) { item.StackCount = stack; }
+                    found.Add(item);
+                }
+                return found;
+            }
+            catch (Exception exc)
+            {
+                log.WriteError("EquippedItems.ReadCarried exception: {0}", exc);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Find one equipped item by id, or null. Used to inspect an item AFTER a wield so
+        /// the record can report what keys it actually ended up carrying.
+        /// </summary>
+        public static EquippedItem FindById(List<EquippedItem> items, int id)
+        {
+            if (items == null) { return null; }
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i].Id == id) { return items[i]; }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Match by name substring, case insensitive, OR by weenie class id when the target
+        /// parses as an integer. Used by wield, where a bare number means a wcid.
+        /// </summary>
+        public static List<EquippedItem> MatchByNameOrWcid(List<EquippedItem> items, string target, out bool matchedByWcid)
+        {
+            matchedByWcid = false;
+            List<EquippedItem> hits = new List<EquippedItem>();
+            if (items == null || target == null) { return hits; }
+            string wanted = target.Trim();
+            if (wanted.Length == 0) { return hits; }
+
+            int wcid = 0;
+            if (int.TryParse(wanted, out wcid))
+            {
+                matchedByWcid = true;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (items[i].Wcid == wcid) { hits.Add(items[i]); }
+                }
+                return hits;
+            }
+            for (int i = 0; i < items.Count; i++)
+            {
+                string name = items[i].Name;
+                if (name == null) { continue; }
+                if (name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) < 0) { continue; }
+                hits.Add(items[i]);
+            }
+            return hits;
         }
 
         /// <summary>

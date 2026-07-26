@@ -22,6 +22,7 @@ namespace ThwargFilter
         readonly Appraiser appraiser = new Appraiser();
         readonly Attacker attacker = new Attacker();
         readonly Unwielder unwielder = new Unwielder();
+        readonly Wielder wielder = new Wielder();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -58,6 +59,7 @@ namespace ThwargFilter
             ThwargFilterCommandParser.Appraise = appraiser;
             ThwargFilterCommandParser.Attack = attacker;
             ThwargFilterCommandParser.Unwield = unwielder;
+            ThwargFilterCommandParser.Wield = wielder;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);

@@ -589,6 +589,7 @@ client-side state into a chat line you can assert on.
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
 | `unwield` verb | `ThwargLauncher\ThwargFilter\Observation\Unwielder.cs` |
+| `wield` verb | `ThwargLauncher\ThwargFilter\Observation\Wielder.cs` |
 | equipped-set resolution shared by verbs | `ThwargLauncher\ThwargFilter\Observation\EquippedItems.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
@@ -1125,11 +1126,87 @@ hangs**. A full pack is the likeliest cause of a genuine failure and the rig can
 `outcome: "requested"` here is stronger than for `attack` or `cast`: it is only written
 **after** the item was confirmed gone from the equipped set.
 
+### The `wield` verb: equip from the pack
+
+The counterpart to `unwield`, and the answer to two independent dead ends:
+
+* **No available server command can put ammunition into the ammo slot on this build.**
+  `/trywield` with correct bare-hex guids taken from the server's own `/ci` audit lines
+  produced **no message and no effect**, for Arrow (wcid 300) and Quarrel (31716), with and
+  without a matching launcher wielded. Missile rigs were impossible.
+* **`/ub useip` is not deterministic.** It was observed to silently no-op, unequip, or swap
+  depending on state, and all three are indistinguishable from chat.
+
+```
+wield <name-substring> [slot]     wield yumi        wield yumi 2
+wield <wcid> [slot]               wield 300         wield 300 2
+```
+
+A bare integer target is a **wcid**, which is what makes ammunition addressable: the module
+lane's Arrow is `wield 300`, Quarrel is `wield 31716`. An optional trailing integer is the
+slot, so multi-word names still work (`wield Deadly Frog Crotch Arrow`).
+
+> **Note the deliberate asymmetry with `unwield`:** a bare integer means a **slot** for
+> `unwield` and a **wcid** for `wield`. You unwield *from a place you know*; you wield *an
+> item you know*. Both are documented on their own verb and both are logged, so the
+> resolution path is always visible in the record.
+
+Exactly one match is equipped. Zero or several equip nothing and report, the same never-guess
+rule as everywhere else, and specifically the failure mode that made `/ub useip` unusable.
+
+#### The API
+
+Verified by reflection **including parameter names**:
+
+```
+HooksWrapper.AutoWield(Int32 item)
+HooksWrapper.AutoWield(Int32 item, Int32 slot, Int32 explic, Int32 notexplic)
+HooksWrapper.AutoWield(Int32 item, Int32 slot, Int32 explic, Int32 notexplic, Int32 zero1, Int32 zero2)
+  backed by IACHooks.AutoWield / AutoWieldEx / AutoWieldRaw
+```
+
+`AutoWield` is a **dedicated equip member**, so this is not a `MoveItem` trick. `MoveItem`'s
+destination parameter is literally named `packId`, and there is **no `EquipMask`-style enum
+anywhere in `Decal.Adapter`**, so an equipment slot is not expressible as a `MoveItem`
+destination at all. Being a client hook, `AutoWield` is almost certainly what `/ub useip`
+ultimately drives; the difference is that this verb **verifies the outcome** instead of
+leaving a no-op indistinguishable from a success.
+
+#### Verification, and the ammo question it settles
+
+The wield is confirmed by **re-reading the equipped set** on a later frame. One retry, then
+it reports `failed` with a `detail` naming the likely cause (slot occupied: `unwield` first).
+
+`outcome: "requested"` is written **only after the item is confirmed present in equipment**.
+
+The record also reports what keys the item ended up carrying, which **settles the open
+question of whether equipped ammunition is Wielder-linked client side** - something the
+oracle could previously only guess at:
+
+```json
+{"utc":"...","source":"filter","type":"WieldResult","target":"300","outcome":"requested",
+ "resolvedId":201,"resolvedName":"Deadly Frog Crotch Arrow","objectClass":"MissileWeapon",
+ "wcid":300,"stackCount":250,"equippedAfter":true,"wieldingSlot":3,
+ "carriesWielder":true,"carriesCoverage":false,"looksLikeAmmo":true,"detail":"equipped"}
+```
+
+| field | meaning |
+| --- | --- |
+| `wcid` / `stackCount` | from the inventory entry before the move |
+| `equippedAfter` | whether the item is in the equipped set after the attempt |
+| `wieldingSlot` | the slot it actually landed in |
+| `carriesWielder` | **the ammo answer**: does the equipped item carry `Wielder`? |
+| `carriesCoverage` | does it carry a `Coverage` mask instead? |
+| `looksLikeAmmo` | would the oracle's ammo heuristic (wielded plus a stack) fire? |
+
+If `carriesWielder` comes back `false` for ammunition on a live run, the oracle's `ammo`
+heuristic needs widening and this record is the evidence for it.
+
 ### Rig pattern: swapping to a caster
 
 ```
 unwield <current weapon>     await UnwieldResult outcome requested
-/trywield <caster>           now succeeds, the hand is free
+wield <caster>               await WieldResult outcome requested
 dumpstate                    confirm state.equipment shows the caster
 <enter combat>               mode follows the weapon, see section 10
 ```

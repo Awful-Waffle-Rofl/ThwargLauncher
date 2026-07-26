@@ -82,6 +82,9 @@ namespace ThwargFilter
         // "unwield" (note "unlockwindowposition"/"ulwp" share only the letter u), and
         // "unwield" prefixes nothing.
         private const string CMD_Unwield = "unwield";
+        // "wield" is NOT a prefix of "unwield" (unwield starts with 'u'), so the two do not
+        // shadow each other in either order. Registered together for readability.
+        private const string CMD_Wield = "wield";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
         private GameStateDumper _gameStateDumper;
@@ -92,6 +95,8 @@ namespace ThwargFilter
         public Attacker Attack { set { _attacker = value; } }
         private Unwielder _unwielder;
         public Unwielder Unwield { set { _unwielder = value; } }
+        private Wielder _wielder;
+        public Wielder Wield { set { _wielder = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -144,6 +149,7 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_AttackStop, AttackStopCommandHandler, "Stop attacking and return to peace mode ('/tf attackstop')");
             cmdHandlers.Add(CMD_Attack, AttackCommandHandler, "Attack a named target ('/tf attack Drudge Skulker')");
             cmdHandlers.Add(CMD_Unwield, UnwieldCommandHandler, "Move a worn or wielded item to the pack ('/tf unwield shield', '/tf unwield 1')");
+            cmdHandlers.Add(CMD_Wield, WieldCommandHandler, "Equip an item from the pack ('/tf wield yumi', '/tf wield 300')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -196,6 +202,11 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_Unwield, out commandString))
             {
                 UnwieldCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_Wield, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Wield, out commandString))
+            {
+                WieldCommandHandler(commandString);
             }
             else
             {
@@ -307,6 +318,37 @@ namespace ThwargFilter
                 return;
             }
             _unwielder.RequestUnwield(command == null ? "" : command.Trim());
+        }
+        private void WieldCommandHandler(string command)
+        {
+            if (_wielder == null)
+            {
+                log.WriteError("wield requested but no Wielder is wired up");
+                return;
+            }
+            string arg = (command == null ? "" : command.Trim());
+            string[] parts = arg.Split(new char[0], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                log.WriteError("wield: expected 'wield <name-substring|wcid> [slot]'");
+                return;
+            }
+            // An optional trailing integer is the slot. Everything before it is the target,
+            // so multi-word names survive.
+            int slot = -1;
+            int targetWordCount = parts.Length;
+            if (parts.Length >= 2)
+            {
+                int maybeSlot = 0;
+                if (int.TryParse(parts[parts.Length - 1], out maybeSlot))
+                {
+                    slot = maybeSlot;
+                    targetWordCount = parts.Length - 1;
+                }
+            }
+            string[] targetWords = new string[targetWordCount];
+            Array.Copy(parts, targetWords, targetWordCount);
+            _wielder.RequestWield(string.Join(" ", targetWords), slot);
         }
         private void AttackStopCommandHandler(string command)
         {
