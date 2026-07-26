@@ -98,6 +98,8 @@ namespace ThwargFilter
             AddNearby(state, notes);
             // State-oracle section. Additive: every field above keeps its existing shape.
             StateOracle.AddState(state, notes);
+            // Outstanding server confirmation dialog, if any. Also additive.
+            Confirmer.AddState(state, notes);
 
             state["notes"] = notes;
 

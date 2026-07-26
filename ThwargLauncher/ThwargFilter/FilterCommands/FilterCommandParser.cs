@@ -78,6 +78,10 @@ namespace ThwargFilter
         // verb is a prefix of it (note "inventory"/"inv" begin "inv", not "it").
         private const string CMD_ItemKeys = "itemkeys";
         private const string CMD_Appraise = "appraise";
+        // No prefix relationship with any registered verb: "cast" and "createteam"/"ct"
+        // share only the letter c, neither is a prefix of "confirm", and "confirm" is not
+        // a prefix of anything registered.
+        private const string CMD_Confirm = "confirm";
         // NOTE: "attackstop" MUST be registered and tested before "attack", because command
         // matching breaks on the first prefix hit and "attackstop" starts with "attack".
         // Registering it second would make "/tf attackstop" start an attack on a creature
@@ -112,6 +116,8 @@ namespace ThwargFilter
         public KeyDumper Keys { set { _keyDumper = value; } }
         private SpellBar _spellBar;
         public SpellBar SpellBarManager { set { _spellBar = value; } }
+        private Confirmer _confirmer;
+        public Confirmer Confirm { set { _confirmer = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -161,7 +167,8 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_DumpState, DumpStateCommandHandler, "Snapshot game state to gamestate_<pid>.txt ('/tf dumpstate')");
             cmdHandlers.Add(CMD_ItemKeys, DumpKeysCommandHandler, "Dump every property of matching objects ('/tf itemkeys quarrel', '/tf itemkeys id:-2147481121')");
             cmdHandlers.Add(CMD_DumpKeys, DumpKeysCommandHandler, null);
-            cmdHandlers.Add(CMD_Appraise, AppraiseCommandHandler, "Appraise self or a named target ('/tf appraise self', '/tf appraise Cray')");
+            cmdHandlers.Add(CMD_Appraise, AppraiseCommandHandler, "Appraise self, a named target, or an explicit guid ('/tf appraise self', '/tf appraise Cray', '/tf appraise id:0x8000123A')");
+            cmdHandlers.Add(CMD_Confirm, ConfirmCommandHandler, "Answer the server's confirmation dialog ('/tf confirm yes', '/tf confirm no', '/tf confirm yes at:400,320')");
             // attackstop before attack: the matching loop breaks on the first prefix hit.
             cmdHandlers.Add(CMD_AttackStop, AttackStopCommandHandler, "Stop attacking and return to peace mode ('/tf attackstop')");
             cmdHandlers.Add(CMD_Attack, AttackCommandHandler, "Attack a named target ('/tf attack Drudge Skulker')");
@@ -205,6 +212,14 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_Appraise, out commandString))
             {
                 AppraiseCommandHandler(commandString);
+            }
+            // Same reasoning as dumpstate and appraise: this arrives on the heartbeat
+            // timer or FileSystemWatcher thread, and the handler marshals onto the game
+            // thread itself, so it must not be handed to the game's chat parser here.
+            else if (IsCommandPrefix(command, CMD_Confirm, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Confirm, out commandString))
+            {
+                ConfirmCommandHandler(commandString);
             }
             // Must precede any "inventory"/"inv" branch for the same prefix reason as the
             // cmdHandlers registration order.
@@ -515,6 +530,15 @@ namespace ThwargFilter
             // The command constant has no trailing space, so both "/tf appraise" and
             // "/tf appraise Cray" match; the remainder needs trimming either way.
             _appraiser.RequestAppraise(command == null ? "" : command.Trim());
+        }
+        private void ConfirmCommandHandler(string command)
+        {
+            if (_confirmer == null)
+            {
+                log.WriteError("confirm requested but no Confirmer is wired up");
+                return;
+            }
+            _confirmer.RequestConfirm(command == null ? "" : command.Trim());
         }
         private void KillClientCommandHandler(string command)
         {

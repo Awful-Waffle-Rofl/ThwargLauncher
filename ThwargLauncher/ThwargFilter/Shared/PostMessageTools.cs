@@ -53,6 +53,21 @@ namespace Filter.Shared
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 25);
             SendMouseClick(rect.Width / 2 - 80, rect.Height / 2 + 31);
         }
+        /// <summary>
+        /// Mirror of ClickYes for the No button. Same three vertical offsets and the same
+        /// reasoning; the x offset is +80 rather than -80, matching the ClickNo that the
+        /// sibling KeyTestApp\PostMsgs.cs has always used.
+        /// </summary>
+        public static void ClickNo()
+        {
+            User32.RECT rect = new User32.RECT();
+
+            User32.GetWindowRect(CoreManager.Current.Decal.Hwnd, ref rect);
+
+            SendMouseClick(rect.Width / 2 + 80, rect.Height / 2 + 18);
+            SendMouseClick(rect.Width / 2 + 80, rect.Height / 2 + 25);
+            SendMouseClick(rect.Width / 2 + 80, rect.Height / 2 + 31);
+        }
         /// <summary>Press a named key in the game window. Pair with SendNamedKeyUp.</summary>
         public static void SendNamedKeyDown(NamedKey key)
         {
