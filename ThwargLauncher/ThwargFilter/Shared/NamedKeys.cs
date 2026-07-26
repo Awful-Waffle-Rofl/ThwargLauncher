@@ -103,10 +103,41 @@ namespace Filter.Shared
         public static readonly NamedKey Apostrophe = new NamedKey("Apostrophe", 0xDE, 0x28, false, "select closest monster");
         public static readonly NamedKey Backtick = new NamedKey("Backtick", 0xC0, 0x29, false, "toggle combat mode");
 
+        // Spell bar hotkeys. In the AC client the numbered keys trigger the corresponding
+        // spell bar slot through the NATIVE cast path, animations and timing included,
+        // which is the whole point of casting this way (see TESTING_CHANNEL.md). Main-row
+        // digits, not the numpad, so none of these are extended keys.
+        public static readonly NamedKey Digit1 = new NamedKey("Digit1", 0x31, 0x02, false, "spell bar slot 1");
+        public static readonly NamedKey Digit2 = new NamedKey("Digit2", 0x32, 0x03, false, "spell bar slot 2");
+        public static readonly NamedKey Digit3 = new NamedKey("Digit3", 0x33, 0x04, false, "spell bar slot 3");
+        public static readonly NamedKey Digit4 = new NamedKey("Digit4", 0x34, 0x05, false, "spell bar slot 4");
+        public static readonly NamedKey Digit5 = new NamedKey("Digit5", 0x35, 0x06, false, "spell bar slot 5");
+        public static readonly NamedKey Digit6 = new NamedKey("Digit6", 0x36, 0x07, false, "spell bar slot 6");
+        public static readonly NamedKey Digit7 = new NamedKey("Digit7", 0x37, 0x08, false, "spell bar slot 7");
+        public static readonly NamedKey Digit8 = new NamedKey("Digit8", 0x38, 0x09, false, "spell bar slot 8");
+        public static readonly NamedKey Digit9 = new NamedKey("Digit9", 0x39, 0x0A, false, "spell bar slot 9");
+        public static readonly NamedKey Digit0 = new NamedKey("Digit0", 0x30, 0x0B, false, "spell bar slot 10");
+
         private static readonly NamedKey[] All = new NamedKey[]
         {
-            End, Delete, PageDown, Insert, PageUp, Apostrophe, Backtick
+            End, Delete, PageDown, Insert, PageUp, Apostrophe, Backtick,
+            Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9, Digit0
         };
+
+        /// <summary>
+        /// The hotkey for a 1-based spell bar slot. Slots 1-9 map to their own digit and
+        /// slot 10 maps to the 0 key, which is the client's layout. Returns null for any
+        /// slot outside 1-10 rather than guessing at a key.
+        /// </summary>
+        public static NamedKey FindSlotKey(int slot)
+        {
+            if (slot >= 1 && slot <= 9) { return Find("Digit" + slot.ToString()); }
+            if (slot == 10) { return Digit0; }
+            return null;
+        }
+
+        /// <summary>Highest spell bar slot reachable by a hotkey.</summary>
+        public const int MAX_SLOT = 10;
 
         /// <summary>
         /// Case insensitive lookup by name. Returns null if the name is not known, so the
