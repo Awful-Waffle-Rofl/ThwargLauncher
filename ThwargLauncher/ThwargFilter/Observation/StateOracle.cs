@@ -189,9 +189,30 @@ namespace ThwargFilter
                 oracle["equipment"] = equipment;
                 oracle["equipmentCount"] = equipment.Count;
                 if (truncated) { oracle["equipmentTruncated"] = true; }
-                // null means "read succeeded, nothing equipped that stacks", which is the
-                // arrows-ran-out signal. It is NOT the same as "unavailable".
-                oracle["ammo"] = ammo;
+
+                // RETRACTED HEURISTIC. This used to report "the wielded item carrying a
+                // StackCount", with null meaning "nothing equipped that stacks". Live
+                // evidence proves that heuristic CANNOT work: with 561 Quarrels showing in
+                // the client's ammunition indicator, the oracle saw wieldedByMe = 1 (the
+                // sword alone) and the quarrel stack among the 26 CONTAINED objects. So
+                // equipped ammunition does NOT carry Wielder == me, exactly like worn
+                // clothing, and a Wielder-gated scan can never see it.
+                //
+                // Reporting null here would assert "there is no equipped ammo", which is
+                // false whenever ammo IS equipped. Until the discriminator is identified
+                // (see the dumpkeys probe), the honest answer is that we do not know.
+                if (ammo != null)
+                {
+                    // A wielded stackable really is equipped; report it, but it is not
+                    // necessarily THE ammo slot.
+                    oracle["ammo"] = ammo;
+                }
+                else
+                {
+                    oracle["ammo"] = "unavailable: equipped ammunition is not Wielder-linked "
+                        + "and the client-side discriminator is not yet identified; "
+                        + "use dumpkeys to probe (see TESTING_CHANNEL section on ammo)";
+                }
                 if (ammoCandidates > 1) { oracle["ammoCandidates"] = ammoCandidates; }
             }
             catch (Exception exc)

@@ -135,7 +135,7 @@ namespace ThwargFilter
             if (target.Length == 0)
             {
                 log.WriteError("unwield: no target given; use 'unwield <name-substring|slot>'");
-                WriteResult(target, OUTCOME_NotFound, null, "no target given");
+                WriteResult(target, OUTCOME_NotFound, null, "no target given", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -146,7 +146,7 @@ namespace ThwargFilter
             if (playerId == 0)
             {
                 log.WriteError("unwield: no character id; not logged in");
-                WriteResult(target, OUTCOME_Failed, null, "no character id");
+                WriteResult(target, OUTCOME_Failed, null, "no character id", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -155,8 +155,26 @@ namespace ThwargFilter
             if (equipped == null)
             {
                 log.WriteError("unwield '{0}': equipped set not readable", target);
-                WriteResult(target, OUTCOME_Failed, null, "equipped set not readable");
+                WriteResult(target, OUTCOME_Failed, null, "equipped set not readable", null);
                 _phase = Phase.Idle;
+                return;
+            }
+
+            // Exact id first, same reason as wield: a name can match several equipped
+            // items and the oracle always supplies the ids.
+            EquippedItem exact;
+            if (EquippedItems.TryMatchById(equipped, target, out exact))
+            {
+                if (exact == null)
+                {
+                    log.WriteInfo("unwield: no equipped item with that id ({0})", target);
+                    WriteResult(target, OUTCOME_NotFound, null, "no equipped item with that id", null);
+                    _phase = Phase.Idle;
+                    return;
+                }
+                _match = exact;
+                _attempts = 0;
+                AttemptMove(playerId);
                 return;
             }
 
@@ -168,7 +186,7 @@ namespace ThwargFilter
                     "unwield '{0}': no {1} match among {2} equipped items; nothing moved",
                     target, (bySlot ? "slot" : "name"), equipped.Count);
                 LogEquipped(equipped);
-                WriteResult(target, OUTCOME_NotFound, null, "no match in the equipped set");
+                WriteResult(target, OUTCOME_NotFound, null, "no match in the equipped set", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -179,8 +197,12 @@ namespace ThwargFilter
                 log.WriteInfo(
                     "unwield '{0}': ambiguous, {1} matches; nothing moved. Narrow the substring or use a slot.",
                     target, hits.Count);
+                // Never guess, same rule as wield: the caller re-issues with an exact id.
+                EquippedItems.SortByStackDescending(hits);
                 LogEquipped(hits);
-                WriteResult(target, OUTCOME_Ambiguous, null, hits.Count + " matches");
+                WriteResult(target, OUTCOME_Ambiguous, null,
+                    hits.Count + " matches; re-issue as unwield id:<id>",
+                    EquippedItems.DescribeCandidates(hits, MAX_LOGGED_CANDIDATES));
                 _phase = Phase.Idle;
                 return;
             }
@@ -219,7 +241,7 @@ namespace ThwargFilter
             if (equipped == null)
             {
                 log.WriteError("unwield: cannot re-read the equipped set to verify");
-                WriteResult(_target, OUTCOME_Failed, _match, "equipped set unreadable at verify");
+                WriteResult(_target, OUTCOME_Failed, _match, "equipped set unreadable at verify", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -231,7 +253,7 @@ namespace ThwargFilter
 
             if (!stillEquipped)
             {
-                WriteResult(_target, OUTCOME_Requested, _match, "moved to pack");
+                WriteResult(_target, OUTCOME_Requested, _match, "moved to pack", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -248,7 +270,7 @@ namespace ThwargFilter
                 "unwield: {0} still equipped after {1} attempts; pack may be full",
                 _match.Describe(), _attempts);
             WriteResult(_target, OUTCOME_Failed, _match,
-                "still equipped after " + _attempts + " attempts; pack may be full");
+                "still equipped after " + _attempts + " attempts; pack may be full", null);
             _phase = Phase.Idle;
         }
 
@@ -266,7 +288,7 @@ namespace ThwargFilter
             }
         }
 
-        private static void WriteResult(string target, string outcome, EquippedItem match, string detail)
+        private static void WriteResult(string target, string outcome, EquippedItem match, string detail, List<object> candidates)
         {
             try
             {
@@ -284,6 +306,7 @@ namespace ThwargFilter
                     entry["fromSlot"] = (match.WieldingSlot >= 0 ? (object)match.WieldingSlot : null);
                     entry["wasWielded"] = match.Wielded;
                 }
+                if (candidates != null) { entry["candidates"] = candidates; }
                 entry["detail"] = detail;
                 ChatLogWriter.WriteEntry(entry);
             }

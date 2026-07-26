@@ -24,6 +24,12 @@ namespace ThwargFilter
         public int StackCount;
         /// <summary>The container this item sits in, or 0 when it is equipped.</summary>
         public int Container;
+        /// <summary>
+        /// LongValueKey.EquipableSlots: the slot mask the ITEM declares it can occupy.
+        /// This is the right source for an explicit wield slot - the item says where it
+        /// goes, so we never have to guess a mask.
+        /// </summary>
+        public int EquipableSlots;
 
         public string Describe()
         {
@@ -140,6 +146,8 @@ namespace ThwargFilter
                     if (TryGetLong(wo, LongValueKey.Type, out wcid)) { item.Wcid = wcid; }
                     int stack = 0;
                     if (TryGetLong(wo, LongValueKey.StackCount, out stack)) { item.StackCount = stack; }
+                    int slots = 0;
+                    if (TryGetLong(wo, LongValueKey.EquipableSlots, out slots)) { item.EquipableSlots = slots; }
                     found.Add(item);
                 }
                 return found;
@@ -163,6 +171,62 @@ namespace ThwargFilter
                 if (items[i].Id == id) { return items[i]; }
             }
             return null;
+        }
+
+        /// <summary>
+        /// Exact-id addressing: "id:1234". This is the ONLY form that is unambiguous when a
+        /// character carries several stacks of the same item, which is the normal case for
+        /// ammunition. The oracle gives every stack's id, so a caller always has the means
+        /// to be exact.
+        /// Returns true when the target used the id: form, whether or not it matched.
+        /// </summary>
+        public static bool TryMatchById(List<EquippedItem> items, string target, out EquippedItem match)
+        {
+            match = null;
+            if (target == null) { return false; }
+            string wanted = target.Trim();
+            if (wanted.Length <= 3) { return false; }
+            if (string.Compare(wanted.Substring(0, 3), "id:", StringComparison.OrdinalIgnoreCase) != 0) { return false; }
+            int id = 0;
+            if (!int.TryParse(wanted.Substring(3).Trim(), out id)) { return true; }
+            match = FindById(items, id);
+            return true;
+        }
+
+        /// <summary>
+        /// Sort a candidate list by stack count descending, so an ambiguous report lists the
+        /// biggest stack first. This orders the REPORT only; it never picks a winner.
+        /// </summary>
+        public static void SortByStackDescending(List<EquippedItem> items)
+        {
+            if (items == null) { return; }
+            items.Sort(new Comparison<EquippedItem>(CompareByStackDescending));
+        }
+
+        private static int CompareByStackDescending(EquippedItem left, EquippedItem right)
+        {
+            return right.StackCount.CompareTo(left.StackCount);
+        }
+
+        /// <summary>
+        /// Candidate summaries for a chatlog record, so a caller can disambiguate by id
+        /// without a second round trip to the oracle.
+        /// </summary>
+        public static List<object> DescribeCandidates(List<EquippedItem> items, int max)
+        {
+            List<object> list = new List<object>();
+            if (items == null) { return list; }
+            for (int i = 0; i < items.Count && i < max; i++)
+            {
+                Dictionary<string, object> c = new Dictionary<string, object>();
+                c["id"] = items[i].Id;
+                c["name"] = items[i].Name;
+                c["stackCount"] = (items[i].StackCount != 0 ? (object)items[i].StackCount : null);
+                c["wcid"] = (items[i].Wcid != 0 ? (object)items[i].Wcid : null);
+                c["wieldingSlot"] = (items[i].WieldingSlot >= 0 ? (object)items[i].WieldingSlot : null);
+                list.Add(c);
+            }
+            return list;
         }
 
         /// <summary>

@@ -71,6 +71,12 @@ namespace ThwargFilter
         private const string CMD_UnlockWindowPosition = "unlockwindowposition";
         private const string CMD_UnlockWindowPosition2 = "ulwp";
         private const string CMD_DumpState = "dumpstate";
+        // "dumpkeys" and "dumpstate" share the "dump" stem but neither is a prefix of the
+        // other, so registration order between them does not matter.
+        private const string CMD_DumpKeys = "dumpkeys";
+        // Primary name for the probe. "itemkeys" collides with nothing: no registered
+        // verb is a prefix of it (note "inventory"/"inv" begin "inv", not "it").
+        private const string CMD_ItemKeys = "itemkeys";
         private const string CMD_Appraise = "appraise";
         // NOTE: "attackstop" MUST be registered and tested before "attack", because command
         // matching breaks on the first prefix hit and "attackstop" starts with "attack".
@@ -97,6 +103,8 @@ namespace ThwargFilter
         public Unwielder Unwield { set { _unwielder = value; } }
         private Wielder _wielder;
         public Wielder Wield { set { _wielder = value; } }
+        private KeyDumper _keyDumper;
+        public KeyDumper Keys { set { _keyDumper = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -144,6 +152,8 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_UnlockWindowPosition, UnlockWindowPositionCommandHandler, "Save and unlock window positions ('/tf ulwp')");
             cmdHandlers.Add(CMD_UnlockWindowPosition2, UnlockWindowPositionCommandHandler, null);
             cmdHandlers.Add(CMD_DumpState, DumpStateCommandHandler, "Snapshot game state to gamestate_<pid>.txt ('/tf dumpstate')");
+            cmdHandlers.Add(CMD_ItemKeys, DumpKeysCommandHandler, "Dump every property of matching objects ('/tf itemkeys quarrel', '/tf itemkeys id:-2147481121')");
+            cmdHandlers.Add(CMD_DumpKeys, DumpKeysCommandHandler, null);
             cmdHandlers.Add(CMD_Appraise, AppraiseCommandHandler, "Appraise self or a named target ('/tf appraise self', '/tf appraise Cray')");
             // attackstop before attack: the matching loop breaks on the first prefix hit.
             cmdHandlers.Add(CMD_AttackStop, AttackStopCommandHandler, "Stop attacking and return to peace mode ('/tf attackstop')");
@@ -171,6 +181,13 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_DumpState, out commandString))
             {
                 DumpStateCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_ItemKeys, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_ItemKeys, out commandString)
+                || IsCommandPrefix(command, CMD_DumpKeys, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_DumpKeys, out commandString))
+            {
+                DumpKeysCommandHandler(commandString);
             }
             // Same reasoning as dumpstate: appraise touches game state, and this runs on
             // the heartbeat timer or FileSystemWatcher thread, so it must not be dispatched
@@ -318,6 +335,15 @@ namespace ThwargFilter
                 return;
             }
             _unwielder.RequestUnwield(command == null ? "" : command.Trim());
+        }
+        private void DumpKeysCommandHandler(string command)
+        {
+            if (_keyDumper == null)
+            {
+                log.WriteError("dumpkeys requested but no KeyDumper is wired up");
+                return;
+            }
+            _keyDumper.RequestDump(command == null ? "" : command.Trim());
         }
         private void WieldCommandHandler(string command)
         {

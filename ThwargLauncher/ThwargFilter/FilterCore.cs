@@ -23,6 +23,7 @@ namespace ThwargFilter
         readonly Attacker attacker = new Attacker();
         readonly Unwielder unwielder = new Unwielder();
         readonly Wielder wielder = new Wielder();
+        readonly KeyDumper keyDumper = new KeyDumper();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -60,6 +61,7 @@ namespace ThwargFilter
             ThwargFilterCommandParser.Attack = attacker;
             ThwargFilterCommandParser.Unwield = unwielder;
             ThwargFilterCommandParser.Wield = wielder;
+            ThwargFilterCommandParser.Keys = keyDumper;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);

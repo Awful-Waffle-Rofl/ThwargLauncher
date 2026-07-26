@@ -51,6 +51,12 @@ namespace ThwargFilter
         private const int MAX_LOGGED_CANDIDATES = 20;
         /// <summary>Let the client choose the slot. AutoWield(item) is the auto-slot form.</summary>
         private const int SLOT_Auto = -1;
+        // EquipMask.MissileAmmo, verified against ACE EquipMask.cs:35. That enum's header
+        // states it is the loc value sent in the player description message F7B0, i.e. the
+        // protocol mask, which is what the client uses too.
+        private const int MASK_MissileAmmo = 0x00800000;
+        // Attempts beyond the first are escalation RUNGS, not blind retries.
+        private const int MAX_RUNGS = 3;
 
         private const string OUTCOME_Requested = "requested";
         private const string OUTCOME_Ambiguous = "ambiguous";
@@ -78,6 +84,8 @@ namespace ThwargFilter
         private EquippedItem _match;
         private int _attempts;
         private DateTime _verifyAtUtc = DateTime.MaxValue;
+        // Which AutoWield form the last rung used, reported in the record.
+        private string _lastMethod = "";
 
         /// <summary>Thread safe. Queue a wield for the next rendered frame.</summary>
         public void RequestWield(string target, int slot)
@@ -144,7 +152,7 @@ namespace ThwargFilter
             if (target.Length == 0)
             {
                 log.WriteError("wield: no target given; use 'wield <name-substring|wcid> [slot]'");
-                WriteResult(target, OUTCOME_NotFound, null, null, "no target given");
+                WriteResult(target, OUTCOME_NotFound, null, null, "no target given", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -155,7 +163,7 @@ namespace ThwargFilter
             if (playerId == 0)
             {
                 log.WriteError("wield: no character id; not logged in");
-                WriteResult(target, OUTCOME_Failed, null, null, "no character id");
+                WriteResult(target, OUTCOME_Failed, null, null, "no character id", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -164,8 +172,26 @@ namespace ThwargFilter
             if (carried == null)
             {
                 log.WriteError("wield '{0}': inventory not readable", target);
-                WriteResult(target, OUTCOME_Failed, null, null, "inventory not readable");
+                WriteResult(target, OUTCOME_Failed, null, null, "inventory not readable", null);
                 _phase = Phase.Idle;
+                return;
+            }
+
+            // Exact id first. With several stacks of one item this is the ONLY
+            // deterministic form, and the oracle always supplies the ids.
+            EquippedItem exact;
+            if (EquippedItems.TryMatchById(carried, target, out exact))
+            {
+                if (exact == null)
+                {
+                    log.WriteInfo("wield: no carried item with that id ({0})", target);
+                    WriteResult(target, OUTCOME_NotFound, null, null, "no carried item with that id", null);
+                    _phase = Phase.Idle;
+                    return;
+                }
+                _match = exact;
+                _attempts = 0;
+                AttemptWield();
                 return;
             }
 
@@ -177,7 +203,7 @@ namespace ThwargFilter
                     "wield '{0}': no {1} match among {2} carried items; nothing equipped",
                     target, (byWcid ? "wcid" : "name"), carried.Count);
                 LogItems(carried);
-                WriteResult(target, OUTCOME_NotFound, null, null, "no match in the inventory");
+                WriteResult(target, OUTCOME_NotFound, null, null, "no match in the inventory", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -188,8 +214,16 @@ namespace ThwargFilter
                 log.WriteInfo(
                     "wield '{0}': ambiguous, {1} matches; nothing equipped. Narrow the substring or use a wcid.",
                     target, hits.Count);
+                // NEVER guess. /ub useip uses the FIRST name match, and with several
+                // stacks of one item which one it grabs is uncontrolled, merging stacks in
+                // either direction. Picking arbitrarily here would reproduce exactly the
+                // bug this verb replaces. The candidate list carries every id and stack
+                // count so the caller can re-issue with id:<id>.
+                EquippedItems.SortByStackDescending(hits);
                 LogItems(hits);
-                WriteResult(target, OUTCOME_Ambiguous, null, null, hits.Count + " matches");
+                WriteResult(target, OUTCOME_Ambiguous, null, null,
+                    hits.Count + " matches; re-issue as wield id:<id>",
+                    EquippedItems.DescribeCandidates(hits, MAX_LOGGED_CANDIDATES));
                 _phase = Phase.Idle;
                 return;
             }
@@ -199,33 +233,59 @@ namespace ThwargFilter
             AttemptWield();
         }
 
+        // ESCALATION LADDER, each rung verified. Live proof established that the plain
+        // single-argument AutoWield equips WEAPONS but does NOT equip AMMUNITION: a
+        // Quarrel stack reported equippedAfter false with BOTH HANDS EMPTY, and the client
+        // ammo indicator stayed absent, so that was a real failure and not a blind verify.
+        //
+        //   rung 1  AutoWield(item)                 proven for weapons
+        //   rung 2  AutoWield(item, mask, 0, 0)     explicit slot
+        //   rung 3  AutoWield(item, mask, 1, 0)     explicit-flag variant
+        //
+        // The mask is not guessed. A caller-supplied slot wins; otherwise the ITEM's own
+        // LongValueKey.EquipableSlots is used, because the item declares where it can go;
+        // only if the item lacks that key do we fall back to EquipMask.MissileAmmo.
+        //
+        // explic/notexplic map to AutoWieldEx's Explicit/NotExplicit, whose semantics are
+        // NOT documented in the assembly, which is why both 0 and 1 are tried rather than
+        // one being asserted as correct.
         private void AttemptWield()
         {
             _attempts++;
+            int mask = ChooseSlotMask();
             try
             {
-                if (_current.Slot == SLOT_Auto)
+                if (_attempts == 1 && _current.Slot == SLOT_Auto)
                 {
                     CoreManager.Current.Actions.AutoWield(_match.Id);
-                    log.WriteInfo(
-                        "wield: AutoWield({0}) attempt {1} for {2}",
-                        _match.Id, _attempts, _match.Describe());
+                    _lastMethod = "AutoWield(item)";
+                }
+                else if (_attempts <= 2)
+                {
+                    CoreManager.Current.Actions.AutoWield(_match.Id, mask, 0, 0);
+                    _lastMethod = string.Format("AutoWield(item, 0x{0:X}, 0, 0)", mask);
                 }
                 else
                 {
-                    // explic/notexplic are the AutoWieldEx flags; 0/0 is the plain form.
-                    CoreManager.Current.Actions.AutoWield(_match.Id, _current.Slot, 0, 0);
-                    log.WriteInfo(
-                        "wield: AutoWield({0}, slot {1}, 0, 0) attempt {2} for {3}",
-                        _match.Id, _current.Slot, _attempts, _match.Describe());
+                    CoreManager.Current.Actions.AutoWield(_match.Id, mask, 1, 0);
+                    _lastMethod = string.Format("AutoWield(item, 0x{0:X}, 1, 0)", mask);
                 }
+                log.WriteInfo("wield: rung {0} via {1} for {2}", _attempts, _lastMethod, _match.Describe());
             }
             catch (Exception exc)
             {
-                log.WriteError("wield: AutoWield threw on attempt {0}: {1}", _attempts, exc);
+                log.WriteError("wield: AutoWield threw on rung {0}: {1}", _attempts, exc);
             }
             _verifyAtUtc = DateTime.UtcNow.AddMilliseconds(VERIFY_DELAY_MS);
             _phase = Phase.Verify;
+        }
+
+        // Caller slot wins; else the item's declared EquipableSlots; else MissileAmmo.
+        private int ChooseSlotMask()
+        {
+            if (_current.Slot != SLOT_Auto) { return _current.Slot; }
+            if (_match != null && _match.EquipableSlots != 0) { return _match.EquipableSlots; }
+            return MASK_MissileAmmo;
         }
 
         private void DoVerify()
@@ -238,7 +298,7 @@ namespace ThwargFilter
             if (equipped == null)
             {
                 log.WriteError("wield: cannot re-read the equipped set to verify");
-                WriteResult(_current.Target, OUTCOME_Failed, _match, null, "equipped set unreadable at verify");
+                WriteResult(_current.Target, OUTCOME_Failed, _match, null, "equipped set unreadable at verify", null);
                 _phase = Phase.Idle;
                 return;
             }
@@ -255,13 +315,14 @@ namespace ThwargFilter
                 log.WriteInfo(
                     "wield: post-equip keys for {0}: wielder={1} worn/coverage={2} slot={3} stack={4}",
                     _match.Id, after.Wielded, after.Worn, after.WieldingSlot, after.StackCount);
-                WriteResult(_current.Target, OUTCOME_Requested, _match, after, "equipped");
+                WriteResult(_current.Target, OUTCOME_Requested, _match, after, "equipped via " + _lastMethod, null);
                 _phase = Phase.Idle;
                 return;
             }
 
-            if (_attempts < MAX_ATTEMPTS)
+            if (_attempts < MAX_RUNGS)
             {
+                log.WriteInfo("wield: rung {0} did not equip, escalating", _attempts);
                 AttemptWield();
                 return;
             }
@@ -270,7 +331,7 @@ namespace ThwargFilter
                 "wield: {0} not equipped after {1} attempts; slot may be occupied (unwield first) or the item may not be wieldable",
                 _match.Describe(), _attempts);
             WriteResult(_current.Target, OUTCOME_Failed, _match, null,
-                "not equipped after " + _attempts + " attempts; slot may be occupied, try unwield first");
+                "not equipped after " + _attempts + " rungs; last method " + _lastMethod, null);
             _phase = Phase.Idle;
         }
 
@@ -294,7 +355,8 @@ namespace ThwargFilter
             string outcome,
             EquippedItem match,
             EquippedItem after,
-            string detail)
+            string detail,
+            List<object> candidates)
         {
             try
             {
@@ -307,6 +369,7 @@ namespace ThwargFilter
                 if (match != null)
                 {
                     entry["resolvedId"] = match.Id;
+                    entry["equipableSlots"] = (match.EquipableSlots != 0 ? (object)match.EquipableSlots : null);
                     entry["resolvedName"] = match.Name;
                     entry["objectClass"] = match.ObjectClass;
                     entry["wcid"] = (match.Wcid != 0 ? (object)match.Wcid : null);
@@ -326,6 +389,7 @@ namespace ThwargFilter
                 {
                     entry["equippedAfter"] = false;
                 }
+                if (candidates != null) { entry["candidates"] = candidates; }
                 entry["detail"] = detail;
                 ChatLogWriter.WriteEntry(entry);
             }
