@@ -27,6 +27,7 @@ namespace ThwargFilter
         //   Wielder       218103818  id of the creature wielding this item
         //   WieldingSlot  218103819  which slot it is wielded in
         //   StackCount    218103814  stack size, present on stackable items such as ammo
+        //   Coverage      218103821  body coverage mask, carried by worn armour/clothing
         // Wielder is the discriminator for "equipped": an item merely sitting in a pack
         // carries Container instead, so filtering on Wielder == me yields exactly the
         // worn/wielded set without walking pack contents.
@@ -96,18 +97,39 @@ namespace ThwargFilter
                     return;
                 }
 
-                List<WorldObject> wielded = CollectWielded(worldFilter, playerId, worldFilter.GetByOwner(playerId));
+                // LOGIN-TIMING RACE. Live runs showed that about 4 seconds after entering
+                // the world this scan returns zero wielded items for a character who is
+                // demonstrably wearing several, because WorldFilter has not been populated
+                // yet. An empty array there would mean "nothing equipped", which is exactly
+                // the ambiguity the three-way contract exists to prevent, so the scan is
+                // gated on a readiness check first: [] must MEAN empty.
+                ScanResult ownerScan = ScanCollection(worldFilter.GetByOwner(playerId), playerId);
+                ScanResult inventoryScan = null;
                 string source = "GetByOwner";
-                if (wielded.Count == 0)
+                if (ownerScan.Wielded.Count == 0)
                 {
-                    List<WorldObject> wider = CollectWielded(worldFilter, playerId, worldFilter.GetInventory());
-                    if (wider.Count > 0)
-                    {
-                        wielded = wider;
-                        source = "GetInventory";
-                    }
+                    // Only pay for the wider walk when the narrow query answered nothing.
+                    inventoryScan = ScanCollection(worldFilter.GetInventory(), playerId);
+                    if (inventoryScan.Wielded.Count > 0) { source = "GetInventory"; }
                 }
+
+                string notReady = GetNotReadyReason(worldFilter, playerId, ownerScan, inventoryScan);
+                if (notReady != null)
+                {
+                    string reason = "unavailable: worldfilter not yet populated (" + notReady + ")";
+                    oracle["equipment"] = reason;
+                    oracle["equipmentCount"] = 0;
+                    oracle["ammo"] = reason;
+                    oracle["equipmentSource"] = source;
+                    AddDiagnostics(oracle, ownerScan, inventoryScan);
+                    notes.Add("state.equipment: " + notReady);
+                    return;
+                }
+
+                List<WorldObject> wielded = ownerScan.Wielded;
+                if (source == "GetInventory" && inventoryScan != null) { wielded = inventoryScan.Wielded; }
                 oracle["equipmentSource"] = source;
+                AddDiagnostics(oracle, ownerScan, inventoryScan);
 
                 for (int i = 0; i < wielded.Count; i++)
                 {
@@ -159,26 +181,130 @@ namespace ThwargFilter
             }
         }
 
-        private static List<WorldObject> CollectWielded(WorldFilter worldFilter, int playerId, WorldObjectCollection collection)
+        /// <summary>
+        /// One pass over a collection, gathering both the wielded set and the counts that
+        /// let us tell "not populated yet" from "genuinely empty", and that instrument the
+        /// open question about worn clothing (see WithCoverage).
+        /// </summary>
+        private class ScanResult
         {
-            List<WorldObject> found = new List<WorldObject>();
-            if (collection == null) { return found; }
+            public List<WorldObject> Wielded = new List<WorldObject>();
+            public int Total;
+            public int WithWielder;
+            public int WithCoverage;
+            public bool Read;
+        }
+
+        private static ScanResult ScanCollection(WorldObjectCollection collection, int playerId)
+        {
+            ScanResult result = new ScanResult();
+            if (collection == null) { return result; }
             try
             {
                 foreach (WorldObject wo in collection)
                 {
                     if (wo == null) { continue; }
+                    result.Total++;
+                    int coverage = 0;
+                    if (TryGetLong(wo, LongValueKey.Coverage, out coverage)) { result.WithCoverage++; }
                     int wielder = 0;
                     if (!TryGetLong(wo, LongValueKey.Wielder, out wielder)) { continue; }
+                    result.WithWielder++;
                     if (wielder != playerId) { continue; }
-                    found.Add(wo);
+                    result.Wielded.Add(wo);
                 }
+                result.Read = true;
             }
             catch (Exception)
             {
-                // Return what we managed to read; the caller still reports a count.
+                // Keep whatever we managed to read; Read stays false so the readiness
+                // check treats a partial enumeration as not-ready rather than as empty.
             }
-            return found;
+            return result;
+        }
+
+        /// <summary>
+        /// Returns null when the world data is trustworthy, otherwise a short reason.
+        ///
+        /// Signals, in order of how defensible they are:
+        ///  1. the character's own object is not in WorldFilter yet;
+        ///  2. that object has no long properties yet, so its bag is still filling;
+        ///  3. neither query enumerated cleanly;
+        ///  4. nothing at all is carried. A logged-in character always carries something,
+        ///     so zero carried objects means the collections have not populated. This one
+        ///     is a heuristic, and it is deliberately biased toward reporting unavailable:
+        ///     a false "unavailable" only costs a validator a retry, while a false "[]"
+        ///     asserts a wrong fact about the world.
+        /// </summary>
+        private static string GetNotReadyReason(
+            WorldFilter worldFilter,
+            int playerId,
+            ScanResult ownerScan,
+            ScanResult inventoryScan)
+        {
+            try
+            {
+                WorldObject player = worldFilter[playerId];
+                if (player == null) { return "character object not in WorldFilter"; }
+                try
+                {
+                    List<int> longKeys = player.LongKeys;
+                    if (longKeys == null || longKeys.Count == 0)
+                    {
+                        return "character object has no properties yet";
+                    }
+                }
+                catch (Exception)
+                {
+                    return "character object property bag not readable";
+                }
+            }
+            catch (Exception exc)
+            {
+                return "character object lookup failed: " + exc.Message;
+            }
+
+            bool ownerRead = (ownerScan != null && ownerScan.Read);
+            bool inventoryRead = (inventoryScan != null && inventoryScan.Read);
+            if (!ownerRead && !inventoryRead) { return "no world object query could be enumerated"; }
+
+            int carried = 0;
+            if (ownerScan != null) { carried += ownerScan.Total; }
+            if (inventoryScan != null && inventoryScan.Total > carried) { carried = inventoryScan.Total; }
+            if (carried == 0) { return "no carried objects visible yet"; }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Counts that let a live run settle what the API surface alone cannot: whether
+        /// worn clothing is present but simply lacks the client-side Wielder key.
+        /// </summary>
+        private static void AddDiagnostics(
+            Dictionary<string, object> oracle,
+            ScanResult ownerScan,
+            ScanResult inventoryScan)
+        {
+            Dictionary<string, object> diag = new Dictionary<string, object>();
+            AddScanDiagnostics(diag, "byOwner", ownerScan);
+            AddScanDiagnostics(diag, "inventory", inventoryScan);
+            oracle["equipmentDiagnostics"] = diag;
+        }
+
+        private static void AddScanDiagnostics(Dictionary<string, object> diag, string prefix, ScanResult scan)
+        {
+            if (scan == null)
+            {
+                diag[prefix] = null;
+                return;
+            }
+            Dictionary<string, object> entry = new Dictionary<string, object>();
+            entry["read"] = scan.Read;
+            entry["total"] = scan.Total;
+            entry["withWielder"] = scan.WithWielder;
+            entry["withCoverage"] = scan.WithCoverage;
+            entry["wieldedByMe"] = scan.Wielded.Count;
+            diag[prefix] = entry;
         }
 
         /// <summary>

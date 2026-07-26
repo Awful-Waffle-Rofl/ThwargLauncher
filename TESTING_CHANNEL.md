@@ -241,6 +241,20 @@ scan failed, and `ammo: null` means "nothing equipped that stacks" (the arrows-r
 signal) while `ammo: "unavailable: ..."` means unknown. A failed section is never silently
 omitted and never collapses to an empty list.
 
+**`[]` means empty, and nothing else.** This is enforced, not merely intended. The equipment
+scan runs a readiness check before it will report an empty array, because the world data can
+be legitimately readable while still unpopulated shortly after login. The readiness check
+fails closed: if it cannot positively confirm the world is populated, it reports
+`unavailable` rather than `[]`. Its signals, in order:
+
+1. the character's own object is not in `WorldFilter` yet;
+2. that object has no long properties yet, so its bag is still filling;
+3. neither world query enumerated cleanly;
+4. nothing at all is carried. A logged-in character always carries something, so zero
+   carried objects means the collections have not populated. This one is a heuristic and is
+   deliberately biased toward `unavailable`: a false `unavailable` costs a validator a
+   retry, while a false `[]` asserts a wrong fact about the world.
+
 #### Fields and their truth source
 
 | field | truth source | notes |
@@ -270,10 +284,38 @@ server last told it, which can be stale.
   **Cost.** The scan is scoped to wielded-only via `WorldFilter.GetByOwner(playerId)`, not
   `GetInventory()`. `GetInventory()` walks everything the character carries including pack
   contents, which is the expensive shape for a 1 to 2 second poll. If `GetByOwner` yields
-  no wielded items at all, the scan retries once through `GetInventory()`, because an empty
-  result there is ambiguous between "nothing equipped" and "that query is not populated";
-  the `Wielder` filter makes both sources produce the same answer. `equipmentSource` tells
-  you which one produced the result. Capped at 40 entries with `equipmentTruncated` if hit.
+  no wielded items at all, the scan retries once through `GetInventory()`. `equipmentSource`
+  tells you which one produced the result. Capped at 40 entries with `equipmentTruncated`
+  if hit.
+
+  **Live result: `GetByOwner` is the populated query.** Both verification runs reported
+  `equipmentSource: "GetByOwner"`, so the `GetInventory` retry is a fallback that does not
+  normally fire.
+
+  **Live result: hand/wielded items only.** A settled read returned exactly the hand slots
+  (for example `Round Shield` slot 3 and `Training Stick` slot 1). The same character's
+  shard DB rows show tunic, pants and boots wielder-linked **server-side**, but those worn
+  items did **not** appear in the client-side scan. So the client-side `Wielder` key appears
+  to cover **wielded items only, not worn armour or clothing**.
+
+  **Confirmed:** hand/wielded items and ammo.
+  **Unverified:** worn armour and clothing coverage. **Validators should target hand slots
+  and ammo**, and should not assume a full paper-doll inventory.
+
+  To settle this without guessing, each scan reports counts in `equipmentDiagnostics`:
+
+  ```json
+  "equipmentDiagnostics": {
+    "byOwner":   { "read": true, "total": 12, "withWielder": 2, "withCoverage": 5, "wieldedByMe": 2 },
+    "inventory": null
+  }
+  ```
+
+  `withCoverage` counts objects carrying `LongValueKey.Coverage` (218103821), which worn
+  armour and clothing have. If a live run shows `withCoverage` well above `withWielder`,
+  the worn items are present in the collection and simply lack the client-side `Wielder`
+  key, and the filter could be widened to include them. `inventory` is `null` when the
+  fallback scan never ran.
 
 * **`ammo`** is derived, not a separate query: it is the wielded item that carries a
   `StackCount`. Weapons and armour do not stack, so this separates arrows from the bow
@@ -314,6 +356,14 @@ Two ways a snapshot can mislead. Neither is fixed here; both are avoidable.
   client was last told. For server truth use `/showstats` and read the response from
   `chatlog_<pid>.jsonl` (`source:"network"`). Prefer vitals for fast polling and
   `/showstats` for assertions that must be authoritative.
+
+* **Reads before roughly 15 to 20 seconds after entering the world are unreliable.** A
+  live run at about 4 seconds after login returned zero wielded items for a character
+  demonstrably wearing several, because `WorldFilter` had not populated yet. That is now
+  detected rather than reported as fact: the equipment scan is gated on a readiness check
+  and reports `"unavailable: worldfilter not yet populated (<reason>)"` instead of an empty
+  array. A validator polling early gets an honest "I do not know" and should retry. A
+  settled read at about 20 seconds was correct in the same runs.
 
 * **Position can be stale if `dumpstate` is batched with a movement command.** If a single
   command file contains `/teleloc ...` followed by `dumpstate`, the snapshot can be taken
