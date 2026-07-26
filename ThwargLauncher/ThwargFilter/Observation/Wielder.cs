@@ -234,9 +234,11 @@ namespace ThwargFilter
         }
 
         // ESCALATION LADDER, each rung verified. Live proof established that the plain
-        // single-argument AutoWield equips WEAPONS but does NOT equip AMMUNITION: a
-        // Quarrel stack reported equippedAfter false with BOTH HANDS EMPTY, and the client
-        // ammo indicator stayed absent, so that was a real failure and not a blind verify.
+        // single-argument AutoWield equips WEAPONS reliably. For AMMUNITION it is
+        // STATE-DEPENDENT, not a categorical failure: one run reported equippedAfter false
+        // with both hands empty, and a later lane equipped a 611 stack on rung 1. So the
+        // ladder exists to cover the cases where rung 1 does not take, not because rung 1
+        // never works for ammo.
         //
         //   rung 1  AutoWield(item)                 proven for weapons
         //   rung 2  AutoWield(item, mask, 0, 0)     explicit slot

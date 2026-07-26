@@ -66,6 +66,26 @@ namespace ThwargFilter
     /// </summary>
     class EquippedItems
     {
+
+        // EQUIPPED TEST: EquippedSlots != 0, and NOTHING ELSE.
+        //
+        // The Wielder-presence arm was REMOVED after live evidence (ledger L8-5):
+        //   equipped weapon -> Wielder = characterId, EquippedSlots non-zero (wand 0x1000000)
+        //   equipped ammo   -> EquippedSlots = 0x800000; Wielder is 0 in one session and
+        //                      ABSENT ENTIRELY on a fresh login, so it is not even
+        //                      consistently present
+        //   after unequip   -> the client ZEROES Wielder and EquippedSlots rather than
+        //                      REMOVING the keys
+        //
+        // That last line is what made the OR-form a real bug: Exists(Wielder) stayed TRUE
+        // for a just-unequipped item, so unwield verified itself as still-equipped and
+        // reported outcome "failed" for a move that had actually SUCCEEDED. A false
+        // failure is worse than a false success here, because a rig retries or aborts on
+        // it. Wielder presence is neither necessary (weapons carry non-zero EquippedSlots
+        // too) nor sufficient (equipped ammo may carry no Wielder key at all).
+        // wielderValue is still REPORTED, for information: characterId means weapon,
+        // 0-or-null means ammunition.
+
         /// <summary>
         /// Returns null when the world data cannot be read at all, which is different from
         /// an empty list (readable world, nothing equipped).
@@ -87,15 +107,17 @@ namespace ThwargFilter
                     int container = 0;
                     bool hasContainer = TryGetLong(wo, LongValueKey.Container, out container) && container != 0;
 
-                    // PRESENCE of the Wielder key, not its value: equipped ammunition
-                    // carries Wielder = 0 while an equipped weapon carries the character id.
-                    // Comparing the value silently excluded every ammo stack.
+                    // EQUIPPED TEST: EquippedSlots != 0, and nothing else. The client
+                    // ZEROES Wielder on unequip rather than removing it, so a
+                    // Wielder-presence arm reports a just-unequipped item as still equipped,
+                    // which made unwield report a false "failed" for a move that succeeded
+                    // (ledger L8-5). Wielder is still read, for reporting only.
                     int wielder = 0;
-                    bool wielded = TryGetLong(wo, LongValueKey.Wielder, out wielder);
+                    TryGetLong(wo, LongValueKey.Wielder, out wielder);
                     int equippedSlots = 0;
                     bool hasEquippedSlots = TryGetLong(wo, LongValueKey.EquippedSlots, out equippedSlots)
                         && equippedSlots != 0;
-                    wielded = wielded || hasEquippedSlots;
+                    bool wielded = hasEquippedSlots;
 
                     int coverage = 0;
                     bool hasCoverage = TryGetLong(wo, LongValueKey.Coverage, out coverage);
