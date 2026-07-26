@@ -303,12 +303,14 @@ server last told it, which can be stale.
   items did **not** appear in the client-side scan. So the client-side `Wielder` key appears
   to cover **wielded items only, not worn armour or clothing**.
 
-  **Resolved.** The diagnostics run settled it: `withCoverage` 10 against `withWielder` 2
-  proved the worn items were present in the collection all along and merely lacked the
-  client-side `Wielder` key. `equipment` is now the **union** of two tests:
+  **Resolved, then corrected.** `equipment` is the **union** of:
 
-  1. `Wielder` equals this character (wielded gear, live-confirmed), or
-  2. the item carries `Coverage` **and sits in no container** (worn armour and clothing).
+  1. the item **carries the `Wielder` key at all** (equipped gear), or
+  2. the item has a non-zero `EquippedSlots` (corroborates, and names the slot), or
+  3. the item carries `Coverage` **and sits in no container** (worn armour and clothing).
+
+  Test 1 checks **key presence, not the value** - see the asymmetry below, which is the
+  single most likely thing to trip anyone reading raw keys.
 
   The container test in (2) is load-bearing and is not optional: a spare shirt in a pack
   also carries `Coverage`, so without it packed clothing would be reported as worn. That
@@ -336,12 +338,12 @@ server last told it, which can be stale.
   key, and the filter could be widened to include them. `inventory` is `null` when the
   fallback scan never ran.
 
-* **`ammo`** is derived, not a separate query: it is the wielded item that carries a
-  `StackCount`. Weapons and armour do not stack, so this separates arrows from the bow
-  without relying on an object class, which Decal does not distinguish for ammunition
-  (there is no `ObjectClass.Ammo`; arrows and bows are both `MissileWeapon`).
-  **This is a heuristic**, stated plainly. If more than one wielded item stacks, the first
-  is reported and `ammoCandidates` gives the count.
+* **`ammo`** is a **lookup, not a heuristic** (this was corrected after a live A/B probe;
+  see "How equipped is actually detected" below). Equipped ammunition is the equipped item
+  whose `EquippedSlots` is `0x800000` (`EquipMask.MissileAmmo`). A fallback also accepts an
+  equipped stack whose `Wielder` **value** is `0`, for a client that reports the key without
+  the mask. `ammo: null` now genuinely means "nothing in the ammo slot". `ammoCandidates`
+  reports ties.
 
 * **`combatMode`** is `Actions.CombatMode`, the same value the `attack` verb sets via
   `SetCombatMode`. Values are `Peace`(1), `Melee`(2), `Missile`(4), `Magic`(8).
@@ -351,6 +353,48 @@ server last told it, which can be stale.
   read meaning nothing is selected. **Negative id caveat:** Decal exposes object ids as
   `Int32`, so genuine AC GUIDs above 2^31 appear **negative**. A validator matching ids
   must expect negative values; do not treat a negative id as an error.
+
+#### How "equipped" is actually detected (verified by A/B probe)
+
+This was settled empirically with the `itemkeys` probe, on **one quarrel stack across a
+single equip toggle**, so it is a controlled A/B rather than an inference:
+
+| state | `Wielder` key | `EquippedSlots` key |
+| --- | --- | --- |
+| ammo **unequipped** | **absent** | **absent** |
+| ammo **equipped** | present, **value `0`** | present, `0x800000` (`MissileAmmo`) |
+| weapon **equipped** | present, value = **character id** | present, weapon slot mask |
+
+**An item is equipped iff it carries the `Wielder` key at all. The VALUE is the character
+id for weapons but ZERO for ammunition.**
+
+> **This asymmetry is the trap.** The filter originally tested `Wielder == characterId`,
+> which is true for weapons and false for ammunition, so **every ammo stack was silently
+> excluded from the equipped set**. The symptom was `ammo: null` while the client's own
+> ammunition indicator showed 611 Quarrels. If you read raw keys and see `wielder = 0`, that
+> does **not** mean "not wielded" - it means "equipped ammunition".
+
+Two further consequences worth holding onto:
+
+* **Equipped ammunition still carries `Container` == the character id**, exactly like a pack
+  item. So a container test cannot distinguish equipped ammo from packed ammo; only the
+  `Wielder`/`EquippedSlots` keys can.
+* **`EquipableSlots` and `EquippedSlots` are different keys** and this distinction is the
+  whole puzzle:
+  * `EquipableSlots` (218103822) - where the item **can** go. Present whether or not it is
+    equipped. This is what the `wield` verb uses to pick a slot mask.
+  * `EquippedSlots` (10) - where the item **currently is**. Present **only while equipped**.
+    Note the bare value `10`: it sits in a different key space from the `2181038xx` block,
+    which is why it looks like a decoy until you need it.
+
+Each `equipment` entry therefore reports `equippedVia` (`wielder`, `equippedSlots` or
+`coverage`), plus the raw `wielderValue` and `equippedSlots`, so a caller can tell a weapon
+from ammunition without re-deriving any of this. `equipmentDiagnostics` also reports
+`withWielderKey` (presence, which drives the test) alongside `withWielder` (non-zero value),
+so an over-matching presence test would be visible immediately.
+
+**Self-test after any change here:** `unwield id:<ammo-id>` used to return `notfound` for
+equipped ammunition, because the equipped set could not see it. It must now find it.
 
 #### `inventory`: pack contents
 
@@ -1039,6 +1083,31 @@ configuration, until somebody proves otherwise in game.
 
 
 ---
+
+## 11b. `itemkeys`: the probe that settles key questions
+
+```
+itemkeys <name-substring>     itemkeys quarrel
+itemkeys <wcid>               itemkeys 31716
+itemkeys id:<id>              itemkeys id:-2147481121
+```
+
+Dumps **every** property the client holds for matching objects: all `LongKeys` with values
+(named via the `LongValueKey` enum where they map, `unnamed(N)` where they do not), plus
+`BoolKeys`, `DoubleKeys`, `StringKeys`, and a `named` convenience block pulling out
+`Container`, `Wielder`, `WieldingSlot`, `EquippedSlots`, `EquipableSlots`, `EquipType`,
+`Coverage`, `StackCount`, `MissileType`, `UsageMask`, `SlotLegacy`, `ItemSlots` and `Type`.
+
+Output goes to three places so whichever suits the task wins:
+
+* the filter log, one line per key, for eyeball diffing;
+* an `ItemKeys` record in `chatlog_<pid>.jsonl`, for programmatic diffing;
+* `objectkeys_<pid>.json`, full overwrite, for a side-by-side file diff.
+
+**The method that works:** produce state A, dump, toggle one thing, dump again, diff. That
+is exactly how the equipped-ammo discriminator above was found, after reasoning from
+documentation had failed. When a question is "which key means X", do not theorise - probe.
+`dumpkeys` is accepted as an alias.
 
 ## 12. Freeing a hand: the `unwield` verb
 

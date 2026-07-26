@@ -14,8 +14,12 @@ namespace ThwargFilter
         public string ObjectClass;
         /// <summary>LongValueKey.WieldingSlot, or -1 when the item does not carry it.</summary>
         public int WieldingSlot = -1;
-        /// <summary>True when Wielder is this character (hand/wielded gear).</summary>
+        /// <summary>True when the item carries the Wielder key at all (equipped gear).</summary>
         public bool Wielded;
+        /// <summary>The raw Wielder value: the character id for weapons, 0 for ammunition.</summary>
+        public int WielderValue;
+        /// <summary>LongValueKey.EquippedSlots: the slot the item currently OCCUPIES.</summary>
+        public int EquippedSlots;
         /// <summary>True when the item carries a Coverage mask (worn armour or clothing).</summary>
         public bool Worn;
         /// <summary>LongValueKey.Type, which is the weenie class id (wcid), or 0.</summary>
@@ -34,12 +38,14 @@ namespace ThwargFilter
         public string Describe()
         {
             return string.Format(
-                "'{0}' id={1} class={2} slot={3} {4}",
+                "'{0}' id={1} class={2} slot={3} equippedSlots=0x{4:X} wielder={5} {6}",
                 Name,
                 Id,
                 ObjectClass,
                 (WieldingSlot >= 0 ? WieldingSlot.ToString() : "?"),
-                (Wielded ? "wielded" : "worn"));
+                EquippedSlots,
+                WielderValue,
+                (Wielded ? "equipped" : "worn"));
         }
     }
 
@@ -81,8 +87,15 @@ namespace ThwargFilter
                     int container = 0;
                     bool hasContainer = TryGetLong(wo, LongValueKey.Container, out container) && container != 0;
 
+                    // PRESENCE of the Wielder key, not its value: equipped ammunition
+                    // carries Wielder = 0 while an equipped weapon carries the character id.
+                    // Comparing the value silently excluded every ammo stack.
                     int wielder = 0;
-                    bool wielded = TryGetLong(wo, LongValueKey.Wielder, out wielder) && wielder == playerId;
+                    bool wielded = TryGetLong(wo, LongValueKey.Wielder, out wielder);
+                    int equippedSlots = 0;
+                    bool hasEquippedSlots = TryGetLong(wo, LongValueKey.EquippedSlots, out equippedSlots)
+                        && equippedSlots != 0;
+                    wielded = wielded || hasEquippedSlots;
 
                     int coverage = 0;
                     bool hasCoverage = TryGetLong(wo, LongValueKey.Coverage, out coverage);
@@ -95,6 +108,8 @@ namespace ThwargFilter
                     item.Name = SafeName(wo);
                     item.ObjectClass = SafeObjectClass(wo);
                     item.Wielded = wielded;
+                    item.WielderValue = wielder;
+                    item.EquippedSlots = equippedSlots;
                     item.Worn = (!wielded && hasCoverage);
                     item.Container = container;
                     int slot = 0;
