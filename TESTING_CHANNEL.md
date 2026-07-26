@@ -267,6 +267,11 @@ fails closed: if it cannot positively confirm the world is populated, it reports
 | `combatMode` | **client-instant, client-only** | `Actions.CombatMode`; see the stance caveat |
 | `stance` | not available | always `unavailable`, see below |
 | `selection` | client-instant | `Actions.CurrentSelection` |
+| `inventory[]` | **client-instant** | pack contents, see below |
+| `inventory[].type` | client-instant | `LongValueKey.Type` (218103808) = the **weenie class id (wcid)** |
+| `attributes` | **client-cached** | six attributes from `CharacterFilter`, `/showstats` is server truth |
+| `skills` | **client-cached** | from `CharacterFilter`, `/showstats` is server truth |
+| `enchantments` | **client-cached** | active buff count plus spell ids |
 | `position` (top level) | client-instant | read at snapshot time |
 | `vitals` (top level) | **client-cached** | can lag the server, see caveats |
 
@@ -298,9 +303,23 @@ server last told it, which can be stale.
   items did **not** appear in the client-side scan. So the client-side `Wielder` key appears
   to cover **wielded items only, not worn armour or clothing**.
 
-  **Confirmed:** hand/wielded items and ammo.
-  **Unverified:** worn armour and clothing coverage. **Validators should target hand slots
-  and ammo**, and should not assume a full paper-doll inventory.
+  **Resolved.** The diagnostics run settled it: `withCoverage` 10 against `withWielder` 2
+  proved the worn items were present in the collection all along and merely lacked the
+  client-side `Wielder` key. `equipment` is now the **union** of two tests:
+
+  1. `Wielder` equals this character (wielded gear, live-confirmed), or
+  2. the item carries `Coverage` **and sits in no container** (worn armour and clothing).
+
+  The container test in (2) is load-bearing and is not optional: a spare shirt in a pack
+  also carries `Coverage`, so without it packed clothing would be reported as worn. That
+  discriminator is **inferred, not yet live-confirmed** - `equipmentDiagnostics
+  .withCoverageNoContainer` reports how many items passed it, so the next live run settles
+  whether the count matches what the character is actually wearing.
+
+  Each entry says how it qualified via `equippedVia`, either `"wielder"` or `"coverage"`,
+  so a validator can still filter to the live-confirmed hand slots alone. Entries also now
+  carry `coverage` (null when absent) and `type` (the wcid). The existing keys keep their
+  shape.
 
   To settle this without guessing, each scan reports counts in `equipmentDiagnostics`:
 
@@ -332,6 +351,69 @@ server last told it, which can be stale.
   read meaning nothing is selected. **Negative id caveat:** Decal exposes object ids as
   `Int32`, so genuine AC GUIDs above 2^31 appear **negative**. A validator matching ids
   must expect negative values; do not treat a negative id as an error.
+
+#### `inventory`: pack contents
+
+Everything carried that sits **inside a container**, which is the exact complement of the
+equipped set. `WorldFilter.GetInventory()` returns the full carried set **including nested
+packs**, so nested contents are covered; each entry reports its `container` id so the
+nesting is visible.
+
+```json
+"inventory": [
+  { "id": 1073742001, "name": "Prismatic Taper", "objectClass": "SpellComponent",
+    "stackCount": 178, "container": 1073741900, "type": 20630 }
+],
+"inventoryCount": 1,
+"inventoryTotal": 1
+```
+
+* `stackCount` and `container` are `null` when the item does not carry that key.
+* `type` is `LongValueKey.Type` (218103808), which is the **weenie class id (wcid)**. This
+  was verified positionally on both sides rather than assumed: ACE writes
+  `Name, WeenieClassId, IconId, ItemType, flags` (`WorldObject_Networking.cs:76-80`) and
+  Decal's own schema names those same fields `name, type, icon, category, behavior`
+  (`messages.xml`, `GameData`). So a validator can match "do I have a sword" by name
+  substring **and** by wcid.
+* Capped at 200 entries with `inventoryTruncated`; `inventoryTotal` is the uncapped count.
+
+**Cost.** This is the expensive query. Equipment is scoped via `GetByOwner`, but inventory
+must walk `GetInventory()`. If snapshot cost becomes a problem at a 1 to 2 second poll,
+this is the section to drop first.
+
+#### `attributes`, `skills`, `enchantments`
+
+All three are **client-cached**: what the server last told the client. `/showstats` remains
+server truth, and validators should cross-check against it for anything authoritative.
+
+```json
+"attributes": {
+  "strength": { "base": 100, "buffed": 130, "creation": 10, "exp": 1234567 },
+  "truthSource": "client-cached"
+},
+"skills": {
+  "Bow": { "current": 315, "base": 290, "buffed": 315, "training": "Specialized", "known": true }
+},
+"skillsProbed": 48,
+"skillsOmitted": 31,
+"skillsTruthSource": "client-cached",
+"enchantments": { "count": 12, "spellIds": [1234, 5678], "truthSource": "client-cached" }
+```
+
+* **`attributes`** covers the six from `CharacterFilter.Attributes`, each with `base`,
+  `buffed`, `creation` and `exp`.
+* **`skills`** only emits skills whose training state is **not** `Unusable`. There are 48
+  `CharFilterSkillType` values and dumping all of them every snapshot would bloat a file
+  meant for fast polling. `skillsProbed` and `skillsOmitted` make the filtering visible, so
+  an absent skill is never ambiguous. `training` is one of `Untrained`, `Trained` or
+  `Specialized`.
+* **`enchantments`** exists because auto-buffing plugins silently move a rig's baseline.
+  `count` is the primary signal; `spellIds` is included because it costs one int per
+  enchantment and lets a rig assert on a specific buff. Capped at 100 with
+  `spellIdsTruncated`.
+
+**Out of scope:** abilities and points are server-custom and are readable only by chat
+readback. They are deliberately not in this snapshot.
 
 #### What `combatMode` is NOT
 

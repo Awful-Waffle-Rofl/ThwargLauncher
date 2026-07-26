@@ -28,10 +28,16 @@ namespace ThwargFilter
         //   WieldingSlot  218103819  which slot it is wielded in
         //   StackCount    218103814  stack size, present on stackable items such as ammo
         //   Coverage      218103821  body coverage mask, carried by worn armour/clothing
-        // Wielder is the discriminator for "equipped": an item merely sitting in a pack
-        // carries Container instead, so filtering on Wielder == me yields exactly the
-        // worn/wielded set without walking pack contents.
+        //   Container     218103810  id of the container this item sits in
+        //   Type          218103808  the WEENIE CLASS ID (wcid), see AddInventory
+        // Wielder is the discriminator for wielded gear. Worn armour and clothing turned
+        // out NOT to carry Wielder client-side (live: withCoverage 10 vs withWielder 2),
+        // so the equipped set is the union of "wielded by me" and "carries Coverage but
+        // sits in no container". The container test matters: a spare shirt in a pack also
+        // carries Coverage, and without it packed clothing would be reported as worn.
         private const int MAX_EQUIPMENT_ENTRIES = 40;
+        private const int MAX_INVENTORY_ENTRIES = 200;
+        private const int MAX_ENCHANTMENT_IDS = 100;
 
         public static void AddState(Dictionary<string, object> state, List<string> notes)
         {
@@ -49,8 +55,12 @@ namespace ThwargFilter
             }
 
             AddEquipmentAndAmmo(oracle, notes, playerId, havePlayer);
+            AddInventory(oracle, notes, playerId, havePlayer);
             AddCombatMode(oracle, notes);
             AddSelection(oracle, notes);
+            AddAttributes(oracle, notes);
+            AddSkills(oracle, notes);
+            AddEnchantments(oracle, notes);
 
             state["state"] = oracle;
         }
@@ -106,11 +116,11 @@ namespace ThwargFilter
                 ScanResult ownerScan = ScanCollection(worldFilter.GetByOwner(playerId), playerId);
                 ScanResult inventoryScan = null;
                 string source = "GetByOwner";
-                if (ownerScan.Wielded.Count == 0)
+                if (ownerScan.Equipped.Count == 0)
                 {
                     // Only pay for the wider walk when the narrow query answered nothing.
                     inventoryScan = ScanCollection(worldFilter.GetInventory(), playerId);
-                    if (inventoryScan.Wielded.Count > 0) { source = "GetInventory"; }
+                    if (inventoryScan.Equipped.Count > 0) { source = "GetInventory"; }
                 }
 
                 string notReady = GetNotReadyReason(worldFilter, playerId, ownerScan, inventoryScan);
@@ -126,8 +136,8 @@ namespace ThwargFilter
                     return;
                 }
 
-                List<WorldObject> wielded = ownerScan.Wielded;
-                if (source == "GetInventory" && inventoryScan != null) { wielded = inventoryScan.Wielded; }
+                List<WorldObject> wielded = ownerScan.Equipped;
+                if (source == "GetInventory" && inventoryScan != null) { wielded = inventoryScan.Equipped; }
                 oracle["equipmentSource"] = source;
                 AddDiagnostics(oracle, ownerScan, inventoryScan);
 
@@ -143,6 +153,18 @@ namespace ThwargFilter
                     int slot = 0;
                     if (TryGetLong(wo, LongValueKey.WieldingSlot, out slot)) { item["wieldingSlot"] = slot; }
                     else { item["wieldingSlot"] = null; }
+
+                    int coverage = 0;
+                    if (TryGetLong(wo, LongValueKey.Coverage, out coverage)) { item["coverage"] = coverage; }
+                    else { item["coverage"] = null; }
+
+                    // How this item qualified as equipped, so a validator can filter to
+                    // hand slots (the live-confirmed set) without guessing from the shape.
+                    int wielderOf = 0;
+                    bool byWielder = TryGetLong(wo, LongValueKey.Wielder, out wielderOf) && wielderOf == playerId;
+                    item["equippedVia"] = (byWielder ? "wielder" : "coverage");
+
+                    item["type"] = TryGetLongOrNull(wo, LongValueKey.Type);
 
                     int stack = 0;
                     if (TryGetLong(wo, LongValueKey.StackCount, out stack))
@@ -188,10 +210,16 @@ namespace ThwargFilter
         /// </summary>
         private class ScanResult
         {
+            /// <summary>Items whose Wielder is me. Hand/wielded gear.</summary>
             public List<WorldObject> Wielded = new List<WorldObject>();
+            /// <summary>Wielded plus worn: the union reported as "equipment".</summary>
+            public List<WorldObject> Equipped = new List<WorldObject>();
+            /// <summary>Items sitting inside a container. Pack contents.</summary>
+            public List<WorldObject> Contained = new List<WorldObject>();
             public int Total;
             public int WithWielder;
             public int WithCoverage;
+            public int WithCoverageNoContainer;
             public bool Read;
         }
 
@@ -205,13 +233,37 @@ namespace ThwargFilter
                 {
                     if (wo == null) { continue; }
                     result.Total++;
+
+                    int container = 0;
+                    bool hasContainer = TryGetLong(wo, LongValueKey.Container, out container) && container != 0;
+
                     int coverage = 0;
-                    if (TryGetLong(wo, LongValueKey.Coverage, out coverage)) { result.WithCoverage++; }
+                    bool hasCoverage = TryGetLong(wo, LongValueKey.Coverage, out coverage);
+                    if (hasCoverage)
+                    {
+                        result.WithCoverage++;
+                        if (!hasContainer) { result.WithCoverageNoContainer++; }
+                    }
+
                     int wielder = 0;
-                    if (!TryGetLong(wo, LongValueKey.Wielder, out wielder)) { continue; }
-                    result.WithWielder++;
-                    if (wielder != playerId) { continue; }
-                    result.Wielded.Add(wo);
+                    bool wieldedByMe = TryGetLong(wo, LongValueKey.Wielder, out wielder) && wielder == playerId;
+                    if (wielder != 0) { result.WithWielder++; }
+
+                    if (wieldedByMe)
+                    {
+                        result.Wielded.Add(wo);
+                        result.Equipped.Add(wo);
+                    }
+                    else if (hasCoverage && !hasContainer)
+                    {
+                        // Worn armour or clothing: carries a body coverage mask and is not
+                        // inside any container.
+                        result.Equipped.Add(wo);
+                    }
+                    else if (hasContainer)
+                    {
+                        result.Contained.Add(wo);
+                    }
                 }
                 result.Read = true;
             }
@@ -303,6 +355,9 @@ namespace ThwargFilter
             entry["total"] = scan.Total;
             entry["withWielder"] = scan.WithWielder;
             entry["withCoverage"] = scan.WithCoverage;
+            entry["withCoverageNoContainer"] = scan.WithCoverageNoContainer;
+            entry["equippedUnion"] = scan.Equipped.Count;
+            entry["contained"] = scan.Contained.Count;
             entry["wieldedByMe"] = scan.Wielded.Count;
             diag[prefix] = entry;
         }
@@ -368,6 +423,252 @@ namespace ThwargFilter
                 oracle["selection"] = "unavailable: " + exc.Message;
                 notes.Add("state.selection: " + exc.Message);
             }
+        }
+
+        /// <summary>
+        /// Pack contents: everything carried that sits inside a container, which is the
+        /// complement of the equipped set. GetInventory() returns the full carried set
+        /// including NESTED packs, so nested contents come for free; each entry reports its
+        /// "container" so the nesting is visible.
+        ///
+        /// COST: this is the expensive query, unlike the equipment scan which is scoped via
+        /// GetByOwner. It is capped at 200 entries with inventoryTruncated, same pattern as
+        /// nearby. If snapshot cost becomes a problem at a 1-2s poll, this is the section to
+        /// drop first.
+        /// </summary>
+        private static void AddInventory(
+            Dictionary<string, object> oracle,
+            List<string> notes,
+            int playerId,
+            bool havePlayer)
+        {
+            if (!havePlayer)
+            {
+                oracle["inventory"] = "unavailable: no character id";
+                oracle["inventoryCount"] = 0;
+                return;
+            }
+            try
+            {
+                WorldFilter worldFilter = CoreManager.Current.WorldFilter;
+                if (worldFilter == null)
+                {
+                    oracle["inventory"] = "unavailable: WorldFilter is null";
+                    oracle["inventoryCount"] = 0;
+                    return;
+                }
+                ScanResult scan = ScanCollection(worldFilter.GetInventory(), playerId);
+                string notReady = GetNotReadyReason(worldFilter, playerId, scan, null);
+                if (notReady != null)
+                {
+                    oracle["inventory"] = "unavailable: worldfilter not yet populated (" + notReady + ")";
+                    oracle["inventoryCount"] = 0;
+                    notes.Add("state.inventory: " + notReady);
+                    return;
+                }
+
+                List<object> items = new List<object>();
+                bool truncated = false;
+                for (int i = 0; i < scan.Contained.Count; i++)
+                {
+                    if (items.Count >= MAX_INVENTORY_ENTRIES) { truncated = true; break; }
+                    WorldObject wo = scan.Contained[i];
+                    Dictionary<string, object> item = new Dictionary<string, object>();
+                    item["id"] = SafeId(wo);
+                    item["name"] = SafeName(wo);
+                    item["objectClass"] = SafeObjectClass(wo);
+                    item["stackCount"] = TryGetLongOrNull(wo, LongValueKey.StackCount);
+                    item["container"] = TryGetLongOrNull(wo, LongValueKey.Container);
+                    // LongValueKey.Type is the WEENIE CLASS ID. Verified positionally on
+                    // both sides: ACE writes Name, WeenieClassId, IconId, ItemType, flags
+                    // (WorldObject_Networking.cs:76-80) and Decal's schema names those
+                    // fields name, type, icon, category, behavior (messages.xml GameData).
+                    item["type"] = TryGetLongOrNull(wo, LongValueKey.Type);
+                    items.Add(item);
+                }
+                oracle["inventory"] = items;
+                oracle["inventoryCount"] = items.Count;
+                oracle["inventoryTotal"] = scan.Contained.Count;
+                if (truncated) { oracle["inventoryTruncated"] = true; }
+            }
+            catch (Exception exc)
+            {
+                oracle["inventory"] = "unavailable: " + exc.Message;
+                oracle["inventoryCount"] = 0;
+                notes.Add("state.inventory: " + exc.Message);
+            }
+        }
+
+        /// <summary>
+        /// The six attributes, from CharacterFilter. CLIENT-CACHED, like vitals: this is
+        /// what the server last told the client. /showstats remains server truth.
+        /// AttributeInfoWrapper exposes Base, Buffed, Creation, Exp and Name.
+        /// </summary>
+        private static void AddAttributes(Dictionary<string, object> oracle, List<string> notes)
+        {
+            try
+            {
+                CharacterFilter filter = CoreManager.Current.CharacterFilter;
+                if (filter == null)
+                {
+                    oracle["attributes"] = "unavailable: CharacterFilter is null";
+                    return;
+                }
+                Dictionary<string, object> attributes = new Dictionary<string, object>();
+                AddAttribute(attributes, filter, "strength", CharFilterAttributeType.Strength);
+                AddAttribute(attributes, filter, "endurance", CharFilterAttributeType.Endurance);
+                AddAttribute(attributes, filter, "quickness", CharFilterAttributeType.Quickness);
+                AddAttribute(attributes, filter, "coordination", CharFilterAttributeType.Coordination);
+                AddAttribute(attributes, filter, "focus", CharFilterAttributeType.Focus);
+                AddAttribute(attributes, filter, "self", CharFilterAttributeType.Self);
+                attributes["truthSource"] = "client-cached";
+                oracle["attributes"] = attributes;
+            }
+            catch (Exception exc)
+            {
+                oracle["attributes"] = "unavailable: " + exc.Message;
+                notes.Add("state.attributes: " + exc.Message);
+            }
+        }
+
+        private static void AddAttribute(
+            Dictionary<string, object> attributes,
+            CharacterFilter filter,
+            string name,
+            CharFilterAttributeType type)
+        {
+            try
+            {
+                AttributeInfoWrapper info = filter.Attributes[type];
+                if (info == null)
+                {
+                    attributes[name] = "unavailable: no attribute info";
+                    return;
+                }
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["base"] = info.Base;
+                entry["buffed"] = info.Buffed;
+                entry["creation"] = info.Creation;
+                entry["exp"] = info.Exp;
+                attributes[name] = entry;
+            }
+            catch (Exception exc)
+            {
+                attributes[name] = "unavailable: " + exc.Message;
+            }
+        }
+
+        /// <summary>
+        /// Skills, from CharacterFilter. CLIENT-CACHED.
+        ///
+        /// Only skills whose training state is not Unusable are emitted: there are 48
+        /// CharFilterSkillType values and dumping all of them every snapshot would bloat a
+        /// file meant for 1-2 second polling. skillsProbed and skillsOmitted make the
+        /// filtering visible so a validator is never guessing why a skill is absent.
+        /// SkillInfoWrapper exposes Current, Base, Buffed, Training and Known.
+        /// </summary>
+        private static void AddSkills(Dictionary<string, object> oracle, List<string> notes)
+        {
+            try
+            {
+                CharacterFilter filter = CoreManager.Current.CharacterFilter;
+                if (filter == null)
+                {
+                    oracle["skills"] = "unavailable: CharacterFilter is null";
+                    return;
+                }
+                Dictionary<string, object> skills = new Dictionary<string, object>();
+                Array values = Enum.GetValues(typeof(CharFilterSkillType));
+                int probed = 0;
+                int omitted = 0;
+                for (int i = 0; i < values.Length; i++)
+                {
+                    CharFilterSkillType type = (CharFilterSkillType)values.GetValue(i);
+                    probed++;
+                    try
+                    {
+                        SkillInfoWrapper info = filter.Skills[type];
+                        if (info == null) { omitted++; continue; }
+                        if (info.Training == TrainingType.Unusable) { omitted++; continue; }
+                        Dictionary<string, object> entry = new Dictionary<string, object>();
+                        entry["current"] = info.Current;
+                        entry["base"] = info.Base;
+                        entry["buffed"] = info.Buffed;
+                        entry["training"] = info.Training.ToString();
+                        entry["known"] = info.Known;
+                        skills[type.ToString()] = entry;
+                    }
+                    catch (Exception)
+                    {
+                        omitted++;
+                    }
+                }
+                oracle["skills"] = skills;
+                oracle["skillsProbed"] = probed;
+                oracle["skillsOmitted"] = omitted;
+                oracle["skillsTruthSource"] = "client-cached";
+            }
+            catch (Exception exc)
+            {
+                oracle["skills"] = "unavailable: " + exc.Message;
+                notes.Add("state.skills: " + exc.Message);
+            }
+        }
+
+        /// <summary>
+        /// Active enchantments. The goal is visibility: auto-buffing plugins silently move
+        /// a rig's baseline, so a validator needs to see that buffs are present at all.
+        /// Count is the primary signal; spell ids are included because they are cheap
+        /// (one int per enchantment) and let a rig assert on a specific buff.
+        /// EnchantmentWrapper exposes SpellId, Family, Layer, Duration and TimeRemaining.
+        /// </summary>
+        private static void AddEnchantments(Dictionary<string, object> oracle, List<string> notes)
+        {
+            try
+            {
+                CharacterFilter filter = CoreManager.Current.CharacterFilter;
+                if (filter == null)
+                {
+                    oracle["enchantments"] = "unavailable: CharacterFilter is null";
+                    return;
+                }
+                int count = filter.Enchantments.Count;
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["count"] = count;
+                List<object> spellIds = new List<object>();
+                bool truncated = false;
+                for (int i = 0; i < count; i++)
+                {
+                    if (spellIds.Count >= MAX_ENCHANTMENT_IDS) { truncated = true; break; }
+                    try
+                    {
+                        EnchantmentWrapper ench = filter.Enchantments[i];
+                        if (ench == null) { continue; }
+                        spellIds.Add(ench.SpellId);
+                    }
+                    catch (Exception)
+                    {
+                        // One unreadable enchantment must not cost the count.
+                    }
+                }
+                entry["spellIds"] = spellIds;
+                if (truncated) { entry["spellIdsTruncated"] = true; }
+                entry["truthSource"] = "client-cached";
+                oracle["enchantments"] = entry;
+            }
+            catch (Exception exc)
+            {
+                oracle["enchantments"] = "unavailable: " + exc.Message;
+                notes.Add("state.enchantments: " + exc.Message);
+            }
+        }
+
+        /// <summary>Boxed int when the key exists, null when it does not.</summary>
+        private static object TryGetLongOrNull(WorldObject wo, LongValueKey key)
+        {
+            int value = 0;
+            if (TryGetLong(wo, key, out value)) { return value; }
+            return null;
         }
 
         private static bool TryGetLong(WorldObject wo, LongValueKey key, out int value)
