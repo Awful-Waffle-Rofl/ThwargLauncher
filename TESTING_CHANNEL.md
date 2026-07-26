@@ -588,6 +588,8 @@ client-side state into a chat line you can assert on.
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
+| verified, self-healing combat mode | `ThwargLauncher\ThwargFilter\Observation\CombatModeSetter.cs` |
+| wielded weapon and the mode it implies | `ThwargLauncher\ThwargFilter\Observation\WieldedWeapon.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
@@ -932,6 +934,98 @@ and the extended flag that a `WM_KEYDOWN` lParam actually wants. So: read the ke
   ignore it.
 * Bindings are per-player. If the keymap differs from the table, set `AttackKey`
   accordingly.
+
+### Combat mode follows the wielded weapon
+
+**Combat mode is not an independently settable axis.** This is the single most important
+thing to know before automating anything combat-related:
+
+* The backtick key toggles **Peace <-> Combat**.
+* **Which** combat mode you get is **derived from the wielded weapon**:
+  wand, staff or orb gives Magic; bow or crossbow gives Missile; a melee weapon (or
+  nothing, for unarmed) gives Melee.
+
+A player cannot reach "melee mode while carrying a wand" at all, and the client says so
+outright: *"You can't enter melee mode while carrying a wand."*
+
+**So the rig sequence is always: wield the right weapon FIRST, then enter combat.** Never
+"set a mode, then wield". A `dumpstate` read of `state.equipment` tells you what is wielded
+before you try.
+
+This is very likely the real explanation for ledger **L6-76**, where `SetCombatMode`
+appeared to no-op in 2 runs out of 4: those were **mode/weapon mismatches, not a race**.
+Asking for a mode the wielded weapon cannot produce is a request the client can only refuse,
+and `SetCombatMode` has no failure channel to report the refusal.
+
+#### The ladder
+
+`Actions.CombatMode` is a same-process client-truth read, so the outcome can always be
+verified even though `SetCombatMode` cannot report failure.
+
+0. **Inspect.** Read `Actions.CombatMode` and the wielded weapon.
+   * Already in a combat mode that satisfies the goal: **done, no input at all**.
+   * Already in a *different* combat mode than a specific request: **fail fast**. Getting
+     there means changing weapon, which is the caller's job.
+   * Request inconsistent with the wielded weapon: **fail fast**, naming what to wield.
+1. **Optional `SetCombatMode`**, only when the request is consistent with the weapon, then
+   verify. Skipped entirely when the weapon class cannot be determined, in which case the
+   filter does what a player does and goes straight to the toggle.
+2. **Post Backtick** (the native toggle), verify. Up to 3 toggle attempts.
+
+Fail-fast matters: it turns an impossible request into an immediate, diagnosable error
+instead of a 20 second convergence timeout that ends in silence.
+
+Every verify logs the observed mode **alongside the wielded weapon**, so any future
+mismatch is self-evident in the log without cross-referencing a `dumpstate`.
+
+#### `attack` defaults to "any combat mode"
+
+Because the weapon decides, `AttackCombatMode` now defaults to **`Any`**: the attack verb
+only needs the client to be *in combat*, not in a particular mode. Setting it to `Melee`,
+`Missile` or `Magic` is still allowed and is then treated as a specific request with the
+fail-fast rules above; that is only useful when the rig is also controlling what is wielded.
+
+The attack input is withheld until the mode is settled, because a tap posted while the
+client is still in `Peace` does nothing.
+
+#### Fields in `AttackResult`
+
+| field | meaning |
+| --- | --- |
+| `combatModeRequested` | `"Any"`, or the specific mode requested |
+| `combatModeFinal` | the mode actually observed on the last verify |
+| `combatModeVerified` | `true` when the goal was met |
+| `combatModeWeapon` | what was wielded, so a mismatch is self-evident |
+| `combatModeImpossible` | `true` when the request was refused as impossible for that weapon |
+| `combatModeRetries` | toggle attempts beyond the first |
+| `combatModeUsedToggle` | `true` when Backtick was posted |
+| `combatModeUsedSetCombatMode` | `true` when the optional `SetCombatMode` rung ran |
+| `combatModeDetail` | short reason the ladder ended where it did |
+| `combatModeObserved` | the mode read at **each** verify, oldest first |
+
+```json
+"combatModeRequested":"Any","combatModeFinal":"Magic","combatModeVerified":true,
+"combatModeWeapon":"'Acid Wand' (WandStaffOrb -> Magic)","combatModeImpossible":false,
+"combatModeRetries":0,"combatModeUsedToggle":true,"combatModeUsedSetCombatMode":false,
+"combatModeDetail":"entered combat by Backtick toggle","combatModeObserved":["Peace","Magic"]
+```
+
+An impossible request reads unmistakably:
+
+```json
+"combatModeRequested":"Melee","combatModeFinal":"Peace","combatModeVerified":false,
+"combatModeImpossible":true,
+"combatModeDetail":"requested Melee but wielded item is 'Acid Wand' (WandStaffOrb), which produces Magic; wield a melee weapon (or nothing, for unarmed) first"
+```
+
+An unverified mode does **not** abort the attack. The input is still synthesized and the
+record carries `combatModeVerified: false`, because refusing outright would hide the failure
+from the harness.
+
+**Stale ladders self-clear.** The ladder only advances on render frames, so a client that
+stops rendering could otherwise leave it in flight forever and every later request would be
+rejected as busy. A ladder older than 5 seconds is abandoned (its original caller is told,
+not left hanging) and the new request takes over.
 
 ### Stopping, and stop latency
 
