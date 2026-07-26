@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using Decal.Adapter;
 using Decal.Adapter.Wrappers;
 
+using Filter.Shared;
+
 namespace ThwargFilter
 {
     /// <summary>
@@ -61,6 +63,7 @@ namespace ThwargFilter
             AddAttributes(oracle, notes);
             AddSkills(oracle, notes);
             AddEnchantments(oracle, notes);
+            AddSpellBar(oracle, notes);
 
             state["state"] = oracle;
         }
@@ -660,6 +663,68 @@ namespace ThwargFilter
             {
                 oracle["enchantments"] = "unavailable: " + exc.Message;
                 notes.Add("state.enchantments: " + exc.Message);
+            }
+        }
+
+        /// <summary>
+        /// The client's spell bar, which is how CLIENT-INITIATED casting is aimed.
+        /// CLIENT-INSTANT: CharacterFilter.SpellBar(tab) is a local read.
+        ///
+        /// Slots are reported 1-based to match the hotkeys that fire them, while the
+        /// underlying collection is 0-based. An empty slot reports spellId null, which is a
+        /// successful read of "nothing here"; a failed read reports "unavailable: ..." as
+        /// everywhere else.
+        /// </summary>
+        private static void AddSpellBar(Dictionary<string, object> oracle, List<string> notes)
+        {
+            try
+            {
+                CharacterFilter filter = CoreManager.Current.CharacterFilter;
+                if (filter == null)
+                {
+                    oracle["spellbar"] = "unavailable: CharacterFilter is null";
+                    return;
+                }
+                System.Collections.ObjectModel.ReadOnlyCollection<int> bar = SpellBar.ReadBar(SpellBar.DEFAULT_TAB);
+                if (bar == null)
+                {
+                    oracle["spellbar"] = "unavailable: SpellBar(" + SpellBar.DEFAULT_TAB + ") not readable";
+                    notes.Add("state.spellbar: SpellBar not readable");
+                    return;
+                }
+                List<object> slots = new List<object>();
+                int occupied = 0;
+                for (int i = 0; i < bar.Count; i++)
+                {
+                    Dictionary<string, object> slot = new Dictionary<string, object>();
+                    slot["slot"] = i + 1;
+                    int spellId = bar[i];
+                    if (spellId != 0)
+                    {
+                        occupied++;
+                        slot["spellId"] = spellId;
+                        slot["known"] = SpellBar.IsSpellKnown(spellId);
+                    }
+                    else
+                    {
+                        slot["spellId"] = null;
+                        slot["known"] = null;
+                    }
+                    // The hotkey that would fire this slot, so a rig never has to derive it.
+                    NamedKey key = NamedKeys.FindSlotKey(i + 1);
+                    slot["hotkey"] = (key == null ? null : key.Name);
+                    slots.Add(slot);
+                }
+                oracle["spellbar"] = slots;
+                oracle["spellbarTab"] = SpellBar.DEFAULT_TAB;
+                oracle["spellbarSlots"] = bar.Count;
+                oracle["spellbarOccupied"] = occupied;
+                oracle["spellbarTruthSource"] = "client-instant";
+            }
+            catch (Exception exc)
+            {
+                oracle["spellbar"] = "unavailable: " + exc.Message;
+                notes.Add("state.spellbar: " + exc.Message);
             }
         }
 
