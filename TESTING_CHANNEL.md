@@ -354,47 +354,63 @@ server last told it, which can be stale.
   `Int32`, so genuine AC GUIDs above 2^31 appear **negative**. A validator matching ids
   must expect negative values; do not treat a negative id as an error.
 
-#### How "equipped" is actually detected (verified by A/B probe)
+#### How "equipped" is actually detected
 
-This was settled empirically with the `itemkeys` probe, on **one quarrel stack across a
-single equip toggle**, so it is a controlled A/B rather than an inference:
+**`EquippedSlots != 0` is the ONLY stable equipped discriminator.** Everything else is
+informational.
 
-| state | `Wielder` key | `EquippedSlots` key |
+Established across several live sessions on the same character:
+
+| state | `EquippedSlots` | `Wielder` |
 | --- | --- | --- |
-| ammo **unequipped** | **absent** | **absent** |
-| ammo **equipped** | present, **value `0`** | present, `0x800000` (`MissileAmmo`) |
-| weapon **equipped** | present, value = **character id** | present, weapon slot mask |
+| equipped **weapon** (wand) | non-zero (`0x1000000`) | `characterId` |
+| equipped **ammunition** | `0x800000` (`MissileAmmo`) | `0` in one session, **absent entirely** on a fresh login |
+| **just unequipped** | **`0`** | **`0` - the key is still there** |
+| packed item | absent / `0` | absent |
+| worn clothing | non-zero (`196`, `384`, `14` observed) | `characterId` |
 
-**An item is equipped iff it carries the `Wielder` key at all. The VALUE is the character
-id for weapons but ZERO for ammunition.**
+Three things follow, and the third is the one that bit us:
 
-> **This asymmetry is the trap.** The filter originally tested `Wielder == characterId`,
-> which is true for weapons and false for ammunition, so **every ammo stack was silently
-> excluded from the equipped set**. The symptom was `ammo: null` while the client's own
-> ammunition indicator showed 611 Quarrels. If you read raw keys and see `wielder = 0`, that
-> does **not** mean "not wielded" - it means "equipped ammunition".
+1. **`Wielder` is not necessary.** Equipped ammunition may carry no `Wielder` key at all.
+2. **`Wielder`'s value is inconsistent.** It is the character id for weapons but `0` for
+   ammunition, so a `Wielder == characterId` test silently excludes all ammo. (This was the
+   first bug found here.)
+3. **`Wielder` is not sufficient, because unequip ZEROES the keys rather than REMOVING
+   them.** A just-unequipped item still carries a `Wielder` key. An `Exists(Wielder)` test
+   therefore reports it as still equipped.
 
-Two further consequences worth holding onto:
+> **Ledger L8-5.** Consequence of (3): `unwield` verifies its own work by re-reading the
+> equipped set, so with a `Wielder`-presence arm it saw the moved item as still equipped and
+> reported `outcome: "failed"` for a move that had **actually succeeded** (server-confirmed
+> via `/save-now`: `Wielder` row gone, `Container` set). **A false failure is worse than a
+> false success here**, because a rig retries or aborts on it. The test is now
+> `EquippedSlots != 0` only.
 
-* **Equipped ammunition still carries `Container` == the character id**, exactly like a pack
-  item. So a container test cannot distinguish equipped ammo from packed ammo; only the
-  `Wielder`/`EquippedSlots` keys can.
-* **`EquipableSlots` and `EquippedSlots` are different keys** and this distinction is the
-  whole puzzle:
-  * `EquipableSlots` (218103822) - where the item **can** go. Present whether or not it is
-    equipped. This is what the `wield` verb uses to pick a slot mask.
-  * `EquippedSlots` (10) - where the item **currently is**. Present **only while equipped**.
-    Note the bare value `10`: it sits in a different key space from the `2181038xx` block,
-    which is why it looks like a decoy until you need it.
+`wielderValue` is still reported per entry, because it usefully distinguishes a **weapon**
+(`characterId`) from **ammunition** (`0` or `null`) - just never use it to decide whether
+something is equipped.
 
-Each `equipment` entry therefore reports `equippedVia` (`wielder`, `equippedSlots` or
-`coverage`), plus the raw `wielderValue` and `equippedSlots`, so a caller can tell a weapon
-from ammunition without re-deriving any of this. `equipmentDiagnostics` also reports
-`withWielderKey` (presence, which drives the test) alongside `withWielder` (non-zero value),
-so an over-matching presence test would be visible immediately.
+**`EquipableSlots` and `EquippedSlots` are different keys**, and the distinction is the
+whole puzzle:
 
-**Self-test after any change here:** `unwield id:<ammo-id>` used to return `notfound` for
-equipped ammunition, because the equipped set could not see it. It must now find it.
+* `EquipableSlots` (218103822) - where the item **can** go. Present whether equipped or not.
+  This is what the `wield` verb uses to choose a slot mask.
+* `EquippedSlots` (**10**) - where the item **currently is**. Non-zero only while equipped.
+  Note the bare value `10`: it sits outside the `2181038xx` block, which is why it looks
+  like a decoy until you need it.
+
+Each `equipment` entry reports `equippedVia` (`equippedSlots` or `coverage`) plus the raw
+`wielderValue` and `equippedSlots`. `equipmentDiagnostics` reports `withEquippedSlots`,
+`withWielderKey` and `withWielder` so any drift in these signatures is visible immediately.
+
+**The Coverage arm is retained but is probably redundant.** Worn clothing was observed
+carrying non-zero `EquippedSlots`, so the `Coverage`-with-no-`Container` arm should never be
+the only thing admitting an item. It is kept as a safety net rather than removed blind, and
+`equipmentDiagnostics.withCoverageOnlyAdmitted` counts items admitted by it alone. If that
+stays `0` across live runs, the arm can be removed with evidence.
+
+**Self-test:** `unwield <something equipped>` must report `outcome: "requested"`. If it
+reports `"failed"` for an item that visibly moved, the equipped test has regressed.
 
 #### `inventory`: pack contents
 

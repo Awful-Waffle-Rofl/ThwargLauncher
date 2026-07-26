@@ -49,6 +49,26 @@ namespace ThwargFilter
         // sits in no container". The container test matters: a spare shirt in a pack also
         // carries Coverage, and without it packed clothing would be reported as worn.
         private const int MAX_EQUIPMENT_ENTRIES = 40;
+
+        // EQUIPPED TEST: EquippedSlots != 0, and NOTHING ELSE.
+        //
+        // The Wielder-presence arm was REMOVED after live evidence (ledger L8-5):
+        //   equipped weapon -> Wielder = characterId, EquippedSlots non-zero (wand 0x1000000)
+        //   equipped ammo   -> EquippedSlots = 0x800000; Wielder is 0 in one session and
+        //                      ABSENT ENTIRELY on a fresh login, so it is not even
+        //                      consistently present
+        //   after unequip   -> the client ZEROES Wielder and EquippedSlots rather than
+        //                      REMOVING the keys
+        //
+        // That last line is what made the OR-form a real bug: Exists(Wielder) stayed TRUE
+        // for a just-unequipped item, so unwield verified itself as still-equipped and
+        // reported outcome "failed" for a move that had actually SUCCEEDED. A false
+        // failure is worse than a false success here, because a rig retries or aborts on
+        // it. Wielder presence is neither necessary (weapons carry non-zero EquippedSlots
+        // too) nor sufficient (equipped ammo may carry no Wielder key at all).
+        // wielderValue is still REPORTED, for information: characterId means weapon,
+        // 0-or-null means ammunition.
+
         /// <summary>
         /// EquipMask.MissileAmmo, verified against ACE EquipMask.cs:35 and confirmed live:
         /// an equipped quarrel stack reported EquippedSlots = 8388608 = 0x800000.
@@ -187,7 +207,10 @@ namespace ThwargFilter
                     bool bySlots = TryGetLong(wo, LongValueKey.EquippedSlots, out slotsOf) && slotsOf != 0;
                     item["wielderValue"] = (byWielder ? (object)wielderOf : null);
                     item["equippedSlots"] = (bySlots ? (object)slotsOf : null);
-                    item["equippedVia"] = (byWielder ? "wielder" : (bySlots ? "equippedSlots" : "coverage"));
+                    // How the item was ADMITTED, which is now only ever equippedSlots or
+                    // coverage. Use wielderValue to tell a weapon (characterId) from
+                    // ammunition (0 or null).
+                    item["equippedVia"] = (bySlots ? "equippedSlots" : "coverage");
 
                     item["type"] = TryGetLongOrNull(wo, LongValueKey.Type);
 
@@ -266,6 +289,13 @@ namespace ThwargFilter
             public int WithWielderKey;
             /// <summary>Non-zero EquippedSlots: corroborates equipped and names the slot.</summary>
             public int WithEquippedSlots;
+            /// <summary>
+            /// Admitted by the Coverage arm ALONE, i.e. no non-zero EquippedSlots. Worn
+            /// clothing was observed carrying EquippedSlots (196/384/14), which makes the
+            /// Coverage arm probably redundant. It is RETAINED as a safety net rather than
+            /// removed blind; if this count stays 0 across live runs it can go.
+            /// </summary>
+            public int WithCoverageOnlyAdmitted;
             public int WithCoverage;
             public int WithCoverageNoContainer;
             public bool Read;
@@ -299,7 +329,8 @@ namespace ThwargFilter
                     int equippedSlots = 0;
                     bool hasEquippedSlots = TryGetLong(wo, LongValueKey.EquippedSlots, out equippedSlots)
                         && equippedSlots != 0;
-                    bool wieldedByMe = hasWielderKey || hasEquippedSlots;
+                    // EquippedSlots ONLY. See the equipped-test note on the class.
+                    bool wieldedByMe = hasEquippedSlots;
 
                     if (hasWielderKey) { result.WithWielderKey++; }
                     if (wielder != 0) { result.WithWielder++; }
@@ -313,7 +344,10 @@ namespace ThwargFilter
                     else if (hasCoverage && !hasContainer)
                     {
                         // Worn armour or clothing: carries a body coverage mask and is not
-                        // inside any container.
+                        // inside any container. Probably redundant now that EquippedSlots is
+                        // the test (worn items were observed carrying it), but retained as a
+                        // safety net and counted so its redundancy can be PROVEN.
+                        result.WithCoverageOnlyAdmitted++;
                         result.Equipped.Add(wo);
                     }
                     else if (hasContainer)
@@ -415,6 +449,8 @@ namespace ThwargFilter
             // over-matching and this is the field that shows it.
             entry["withWielderKey"] = scan.WithWielderKey;
             entry["withEquippedSlots"] = scan.WithEquippedSlots;
+            // If this stays 0 across live runs, the Coverage arm is provably redundant.
+            entry["withCoverageOnlyAdmitted"] = scan.WithCoverageOnlyAdmitted;
             entry["withCoverage"] = scan.WithCoverage;
             entry["withCoverageNoContainer"] = scan.WithCoverageNoContainer;
             entry["equippedUnion"] = scan.Equipped.Count;
