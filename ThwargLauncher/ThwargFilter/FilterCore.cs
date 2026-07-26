@@ -25,6 +25,7 @@ namespace ThwargFilter
         readonly Wielder wielder = new Wielder();
         readonly KeyDumper keyDumper = new KeyDumper();
         readonly SpellBar spellBar = new SpellBar();
+        readonly Confirmer confirmer = new Confirmer();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -64,6 +65,7 @@ namespace ThwargFilter
             ThwargFilterCommandParser.Wield = wielder;
             ThwargFilterCommandParser.Keys = keyDumper;
             ThwargFilterCommandParser.SpellBarManager = spellBar;
+            ThwargFilterCommandParser.Confirm = confirmer;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);
@@ -176,8 +178,9 @@ namespace ThwargFilter
                 loginNextCharacterManager.FilterCore_ServerDispatch(sender, e);
 
                 // Observation only, and last, so it cannot affect the login path above.
-                // ChatObserver swallows its own exceptions and never rethrows.
+                // Both of these swallow their own exceptions and never rethrow.
                 chatObserver.FilterCore_ServerDispatch(sender, e);
+                confirmer.FilterCore_ServerDispatch(sender, e);
             }
             catch (Exception ex) { Debug.LogException(ex); }
         }

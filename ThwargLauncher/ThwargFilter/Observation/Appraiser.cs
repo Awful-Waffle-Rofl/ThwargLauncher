@@ -34,6 +34,22 @@ namespace ThwargFilter
         /// <summary>Bare "appraise", or "appraise self", targets the logged in character.</summary>
         public const string TARGET_Self = "self";
 
+        /// <summary>
+        /// "appraise id:N" targets an explicit object guid, decimal or 0x hex.
+        ///
+        /// WHY THIS EXISTS: the name based form resolves through TargetResolver, which
+        /// reads the world object list, so it can only reach things that are IN THE WORLD.
+        /// An item sitting in the player's pack is not reachable that way, which meant the
+        /// server's "last appraised object" could not be aimed at an inventory item at all.
+        /// Admin commands that act on the last appraised object (the /usewith source, for
+        /// one) therefore had to be raced against a freshly spawned item instead of simply
+        /// aimed, and an item that had already been acted on could never be re-aimed.
+        /// This form skips resolution entirely and sends RequestId for the guid given.
+        ///
+        /// Same convention as "itemkeys id:N" in KeyDumper.
+        /// </summary>
+        public const string TARGET_IdPrefix = "id:";
+
         // Outcomes emitted into chatlog_<pid>.jsonl so a harness can await the result
         // without parsing the filter log.
         private const string OUTCOME_Requested = "requested";
@@ -118,6 +134,14 @@ namespace ThwargFilter
                 {
                     AppraiseSelf();
                 }
+                else if (trimmed.Length > TARGET_IdPrefix.Length
+                    && string.Compare(
+                        trimmed.Substring(0, TARGET_IdPrefix.Length),
+                        TARGET_IdPrefix,
+                        StringComparison.OrdinalIgnoreCase) == 0)
+                {
+                    AppraiseById(trimmed, trimmed.Substring(TARGET_IdPrefix.Length).Trim());
+                }
                 else
                 {
                     AppraiseByName(trimmed);
@@ -158,6 +182,92 @@ namespace ThwargFilter
             else
             {
                 WriteResult(TARGET_Self, OUTCOME_NotFound, 0, null, 0);
+            }
+        }
+
+        /// <summary>
+        /// Appraise one explicit guid. Deliberately does NOT require the object to be in
+        /// the world object list: reaching inventory items is the entire point of this
+        /// form. The name is looked up only for the log record, and its absence is not an
+        /// error.
+        /// </summary>
+        private void AppraiseById(string target, string idText)
+        {
+            int objectId = 0;
+            if (!TryParseId(idText, out objectId))
+            {
+                log.WriteError("appraise '{0}': '{1}' is not a decimal or 0x hex object id", target, idText);
+                WriteResult(target, OUTCOME_NotFound, 0, null, 0);
+                return;
+            }
+            string name = LookupName(objectId);
+            if (SendRequestId(objectId))
+            {
+                log.WriteInfo("appraise '{0}': requested id for object {1} ({2})", target, objectId, (name == null ? "name unknown" : name));
+                WriteResult(target, OUTCOME_Requested, objectId, name, 1);
+            }
+            else
+            {
+                WriteResult(target, OUTCOME_NotFound, 0, null, 0);
+            }
+        }
+
+        /// <summary>
+        /// Accepts decimal and 0x hex. Guids are unsigned on the wire but Decal's object
+        /// id is a signed Int32, so a hex guid at or above 0x80000000 - which every
+        /// dynamic object guid is - must be read unsigned and reinterpreted, not parsed
+        /// as a signed int, or it overflows and fails.
+        /// </summary>
+        private static bool TryParseId(string text, out int objectId)
+        {
+            objectId = 0;
+            if (string.IsNullOrEmpty(text)) { return false; }
+            string trimmed = text.Trim();
+            bool hex = trimmed.Length > 2
+                && trimmed[0] == '0'
+                && (trimmed[1] == 'x' || trimmed[1] == 'X');
+            if (hex)
+            {
+                uint parsed = 0;
+                if (!uint.TryParse(
+                        trimmed.Substring(2),
+                        System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out parsed))
+                {
+                    return false;
+                }
+                objectId = unchecked((int)parsed);
+                return true;
+            }
+            // Decimal: accept the signed form Decal itself reports, and the unsigned form
+            // an ACE /propertydump or SQL row would show for the same object.
+            int signed = 0;
+            if (int.TryParse(trimmed, out signed))
+            {
+                objectId = signed;
+                return true;
+            }
+            uint unsignedValue = 0;
+            if (uint.TryParse(trimmed, out unsignedValue))
+            {
+                objectId = unchecked((int)unsignedValue);
+                return true;
+            }
+            return false;
+        }
+
+        private static string LookupName(int objectId)
+        {
+            try
+            {
+                WorldObject wo = CoreManager.Current.WorldFilter[objectId];
+                if (wo == null) { return null; }
+                return wo.Name;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 

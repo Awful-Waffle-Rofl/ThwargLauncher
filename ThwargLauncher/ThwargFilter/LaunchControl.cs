@@ -210,6 +210,11 @@ namespace ThwargFilter
                 stream.WriteLine("SecondsInStage:{0}", status.SecondsInStage);
                 stream.WriteLine("RequestedCharacter:{0}", status.RequestedCharacter);
                 stream.WriteLine("StatusNote:{0}", status.StatusNote);
+                stream.WriteLine("ConfirmationState:{0}", status.ConfirmationState);
+                stream.WriteLine("ConfirmationType:{0}", status.ConfirmationType);
+                stream.WriteLine("ConfirmationContext:{0}", status.ConfirmationContext);
+                stream.WriteLine("ConfirmationText:{0}", status.ConfirmationText);
+                stream.WriteLine("ConfirmationAnswer:{0}", status.ConfirmationAnswer);
                 var text = stream.ToString();
                 return text;
             }
@@ -267,6 +272,13 @@ namespace ThwargFilter
                 info.Status.SecondsInStage = GetOptionalIntValue(settings, "SecondsInStage", 0);
                 info.Status.RequestedCharacter = GetOptionalStringValue(settings, "RequestedCharacter");
                 info.Status.StatusNote = GetOptionalStringValue(settings, "StatusNote");
+                // Present from file version 1.6 only; read optionally for the same
+                // rolling-upgrade reason as the 1.5 fields above.
+                info.Status.ConfirmationState = GetOptionalStringValue(settings, "ConfirmationState");
+                info.Status.ConfirmationType = GetOptionalIntValue(settings, "ConfirmationType", 0);
+                info.Status.ConfirmationContext = GetOptionalIntValue(settings, "ConfirmationContext", 0);
+                info.Status.ConfirmationText = GetOptionalStringValue(settings, "ConfirmationText");
+                info.Status.ConfirmationAnswer = GetOptionalStringValue(settings, "ConfirmationAnswer");
 
                 info.IsValid = true;
             }

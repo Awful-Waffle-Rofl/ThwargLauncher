@@ -216,6 +216,17 @@ namespace ThwargFilter
                 _status.SecondsInStage = LoginStageTracker.GetSecondsInStage();
                 _status.RequestedCharacter = LoginStageTracker.GetRequestedCharacter();
                 _status.StatusNote = LoginStageTracker.GetStatusNote();
+                string confirmState;
+                int confirmType;
+                int confirmContext;
+                string confirmText;
+                string confirmAnswer;
+                Confirmer.GetStatus(out confirmState, out confirmType, out confirmContext, out confirmText, out confirmAnswer);
+                _status.ConfirmationState = confirmState;
+                _status.ConfirmationType = confirmType;
+                _status.ConfirmationContext = confirmContext;
+                _status.ConfirmationText = confirmText;
+                _status.ConfirmationAnswer = confirmAnswer;
                 LaunchControl.RecordHeartbeatStatus(_gameToLauncherFilepath, _status);
             }
             catch (Exception exc)

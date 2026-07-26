@@ -669,6 +669,8 @@ client-side state into a chat line you can assert on.
 | `dumpstate` verb wiring | `ThwargLauncher\ThwargFilter\FilterCommands\FilterCommandParser.cs` |
 | state-oracle section of `dumpstate` | `ThwargLauncher\ThwargFilter\Observation\StateOracle.cs` |
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
+| `confirm` verb and confirmation observation | `ThwargLauncher\ThwargFilter\Observation\Confirmer.cs` |
+| the Yes / No / OK click helpers | `ThwargLauncher\ThwargFilter\Shared\PostMessageTools.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
 | `unwield` verb | `ThwargLauncher\ThwargFilter\Observation\Unwielder.cs` |
@@ -679,6 +681,7 @@ client-side state into a chat line you can assert on.
 | wielded weapon and the mode it implies | `ThwargLauncher\ThwargFilter\Observation\WieldedWeapon.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
+| smoke test for `confirm` and `appraise id:` | `tools\confirm-verb-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
 | command file format | `ThwargLauncher\ThwargFilter\Channels\` |
 
@@ -784,6 +787,27 @@ in game as `/tf appraise ...`. It is registered in `/tf help`.
 | `appraise` | appraise the logged in character |
 | `appraise self` | same as bare `appraise` |
 | `appraise <name-substring>` | case insensitive substring match over landscape objects and players |
+| `appraise id:<guid>` | appraise one explicit object id, no resolution and no ambiguity |
+
+### `appraise id:<guid>`: the form that reaches inventory
+
+The substring form resolves through the shared target resolver, which reads the **world**
+object list. An item in the player's pack is not in that list, so the name form cannot aim
+at one at all. That is the gap that forced rigs into a race: spawn a fresh item, poll
+`itemkeys` until the guid the audit reported showed up, then fire immediately - and an item
+that had already been acted on could never be re-aimed.
+
+`appraise id:<guid>` skips resolution entirely and sends the identify request for the guid
+you name, so the server's last-appraised object becomes deterministic.
+
+* Decimal and `0x` hex are both accepted.
+* Guids are unsigned on the wire but Decal's object id is a signed `Int32`, so `0x80000ADF`
+  and `2147486431` and `-2147480865` all name the **same** object. All three parse.
+* The object does **not** have to be in the world list. Its name is looked up only for the
+  log record, and a missing name is not an error.
+
+The `AppraiseResult` record is emitted exactly as for the other forms, with `target` echoing
+the `id:` text you sent.
 
 Matching rules for the substring form:
 
@@ -1519,3 +1543,126 @@ These are **not** handled by the filter. A cast will silently do nothing if any 
 5. **Components**, which can be skipped server-side with `/requirecomps off`. Per ledger
    **L6-43** the foci turned out to be a component-list *selector*, not a gate, so a focus
    alone does not remove the component requirement.
+
+---
+
+## 14. Server confirmation dialogs: the `confirm` verb
+
+### Why this exists
+
+An ACE server asks the player a yes/no question by sending `GameEventConfirmationRequest`,
+game event **0x0274** inside the `0xF7B0` game-event container. The only thing that answers
+it is `GameActionConfirmationResponse`, game action **0x0275**, which only the client can
+send: in the ACE source, `ConfirmationManager.HandleResponse` has no caller for a normal
+response other than that game action. Tinkering, augmentations, skill and attribute
+changes, allegiance and fellowship offers all go through it.
+
+Before this verb, a harness that drove any of those actions was stuck twice over. It could
+not answer the question, and it could not even **see** that one had been asked - the only
+record was the ACE server's own log, which a remote or CI run does not have.
+
+### How the answer is sent, and what that costs
+
+**Decal cannot send a raw network message.** Verified by reflection over the whole Decal
+surface (Decal 3.0, `Decal.Adapter` 2.9.8.3):
+
+* `HooksWrapper` (`CoreManager.Current.Actions`) is a fixed list of client-function hooks -
+  `UseItem`, `RequestId`, `CastSpell`, `TradeAccept` and so on. No send of any kind.
+* `Decal.Interop.Net.INetworkFilter2` exposes only `DispatchServer` / `DispatchClient` /
+  `Initialize` / `Terminate`. Those are inbound observation callbacks.
+* `Decal.Interop.Net.INetService` exposes only `Decal` / `Filter` / `FilterVB` / `Hooks`.
+* `IMessageFactory.CreateMessage` builds a message object for **parsing** an observed
+  buffer; it puts nothing on the wire.
+* `messages.xml` defines exactly three outbound messages (`F657`, `F7B1`, `F7DE`), and the
+  `F7B1` switch does not include action `0x0275`.
+
+So the response has to come from the client itself, by operating the client's own
+confirmation panel. `confirm` posts a mouse click at the panel's Yes or No button, exactly
+as `FastQuit` already answers the client's quit box and `AutoRetryLogin` already dismisses
+login boxes. The coordinates come from the client window rect, with the vertical offsets in
+`Shared\PostMessageTools.cs` that were tuned against real clients at 800x600 and 1600x1200.
+
+**The consequence, stated plainly:** this is a screen-position click, not a protocol
+message. It is not verifiable without a live client, and it can miss.
+
+### The verb
+
+Reachable over the launcher channel as `confirm ...` (or `/tf confirm ...`), and typed in
+game as `/tf confirm ...`. It is registered in `/tf help`.
+
+| command | effect |
+| --- | --- |
+| `confirm yes` / `confirm y` | click Yes on the outstanding confirmation |
+| `confirm no` / `confirm n` | click No |
+| `confirm yes at:X,Y` | click one explicit client-relative point instead of the computed button |
+| `confirm yes force` | click even when no confirmation is outstanding |
+
+With no confirmation outstanding, a bare `confirm yes` deliberately does **nothing**. A
+stray click in the 3D window selects or attacks whatever is under it, which would silently
+corrupt the very test that asked for the confirmation. `force` is the override, and `at:`
+exists so the click position can be corrected live without rebuilding the filter.
+
+### Knowing a question is outstanding
+
+Two signals, both remote-readable:
+
+**Heartbeat** (`game_<pid>.txt`, file version **1.6** and later):
+
+| field | meaning |
+| --- | --- |
+| `ConfirmationState` | `none`, `outstanding`, `answered`, `aborted` or `expired` |
+| `ConfirmationType` | the ACE `ConfirmationType` enum value |
+| `ConfirmationContext` | the context id, which is what the response must echo |
+| `ConfirmationText` | the question, flattened to one line and capped at 200 characters |
+| `ConfirmationAnswer` | `yes` or `no`, whichever this filter last clicked |
+
+**`dumpstate`** carries the same thing under `confirmation`, with the full untruncated text
+and the request timestamp.
+
+**`chatlog_<pid>.jsonl`** carries the events, all with `"source": "confirmation"`:
+
+| type | when |
+| --- | --- |
+| `ConfirmationRequest` | the server asked; carries `confirmationType`, `context`, `text` |
+| `ConfirmationAnswer` | the verb ran; carries `answer`, `outcome`, and on `outcome: "clicked"` the `confirmationType`, `context` and `text` of the dialog it answered |
+| `ConfirmationDone` | the server closed the dialog itself |
+
+`ConfirmationAnswer` reports which dialog it answered rather than just that it clicked, so
+a test can prove it answered the question it meant to and not a later one.
+
+### Reading the outcome: silence is success
+
+ACE sends `GameEventConfirmationDone` **only** from `ConfirmationManager.EnqueueAbort`,
+which is the 30 second timeout path. It is not sent after a normal answer. So:
+
+* answer, then silence, then the effect happens -> **the click landed**.
+* answer, then `ConfirmationDone` about 30 seconds later, state `aborted`, usually with
+  `You waited too long to answer the question!` -> **the click did not land**.
+
+The 30 second budget is `ConfirmationManager.confirmationTimeout`. A rig has that long
+between seeing `outstanding` and clicking.
+
+### Rig pattern
+
+```
+<the admin command that asks a question>
+poll game_<pid>.txt until ConfirmationState == outstanding   <- 30s budget starts
+confirm yes
+await the ConfirmationAnswer record with outcome "clicked"
+assert the downstream effect, and assert no ConfirmationDone follows
+```
+
+### What is not verified
+
+The vertical and horizontal offsets in `ClickYes` / `ClickNo` were tuned against the
+client's **own** message boxes (quit, login). Whether the **server-driven** confirmation
+panel is drawn in the same place is a hypothesis until someone runs it against a live
+client. If it is not, `confirm yes at:X,Y` answers it at the corrected position and the
+constants can then be fixed; `confirm yes force` separates "the filter never saw the
+request" from "the click missed the button".
+
+### Off-client smoke test
+
+`tools\confirm-verb-smoke.ps1`, run through the 32-bit host, covers routing, argument
+parsing, the state machine and the chat-log records without a client. It cannot cover the
+click landing or the server accepting the answer.
