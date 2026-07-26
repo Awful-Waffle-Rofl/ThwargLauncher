@@ -91,6 +91,11 @@ namespace ThwargFilter
         // "wield" is NOT a prefix of "unwield" (unwield starts with 'u'), so the two do not
         // shadow each other in either order. Registered together for readability.
         private const string CMD_Wield = "wield";
+        // "spellbar" carries its own subcommands (clear / set), parsed from the remainder,
+        // so there is no prefix collision between them. "cast" does not prefix any other
+        // verb, and no other verb prefixes it.
+        private const string CMD_SpellBar = "spellbar";
+        private const string CMD_Cast = "cast";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
         private GameStateDumper _gameStateDumper;
@@ -105,6 +110,8 @@ namespace ThwargFilter
         public Wielder Wield { set { _wielder = value; } }
         private KeyDumper _keyDumper;
         public KeyDumper Keys { set { _keyDumper = value; } }
+        private SpellBar _spellBar;
+        public SpellBar SpellBarManager { set { _spellBar = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -160,6 +167,8 @@ namespace ThwargFilter
             cmdHandlers.Add(CMD_Attack, AttackCommandHandler, "Attack a named target ('/tf attack Drudge Skulker')");
             cmdHandlers.Add(CMD_Unwield, UnwieldCommandHandler, "Move a worn or wielded item to the pack ('/tf unwield shield', '/tf unwield 1')");
             cmdHandlers.Add(CMD_Wield, WieldCommandHandler, "Equip an item from the pack ('/tf wield yumi', '/tf wield 300')");
+            cmdHandlers.Add(CMD_SpellBar, SpellBarCommandHandler, "Manage the spell bar ('/tf spellbar clear', '/tf spellbar set 1 1234')");
+            cmdHandlers.Add(CMD_Cast, CastCommandHandler, "Cast the spell in a bar slot via its hotkey ('/tf cast 1')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -224,6 +233,16 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_Wield, out commandString))
             {
                 WieldCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_SpellBar, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_SpellBar, out commandString))
+            {
+                SpellBarCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_Cast, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Cast, out commandString))
+            {
+                CastCommandHandler(commandString);
             }
             else
             {
@@ -375,6 +394,66 @@ namespace ThwargFilter
             string[] targetWords = new string[targetWordCount];
             Array.Copy(parts, targetWords, targetWordCount);
             _wielder.RequestWield(string.Join(" ", targetWords), slot);
+        }
+        private void SpellBarCommandHandler(string command)
+        {
+            if (_spellBar == null)
+            {
+                log.WriteError("spellbar requested but no SpellBar is wired up");
+                return;
+            }
+            string arg = (command == null ? "" : command.Trim());
+            string[] parts = arg.Split(new char[0], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0)
+            {
+                log.WriteInfo("spellbar: expected 'clear' or 'set <slot> <spellId>'");
+                return;
+            }
+            if (string.Compare(parts[0], "clear", StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                _spellBar.RequestClear(SpellBar.DEFAULT_TAB);
+                return;
+            }
+            if (string.Compare(parts[0], "set", StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                if (parts.Length < 3)
+                {
+                    log.WriteError("spellbar set: expected 'set <slot> <spellId>'");
+                    return;
+                }
+                int slot = 0;
+                int spellId = 0;
+                if (!int.TryParse(parts[1], out slot) || !int.TryParse(parts[2], out spellId))
+                {
+                    log.WriteError("spellbar set: slot and spellId must both be numbers");
+                    return;
+                }
+                if (slot < 1 || slot > NamedKeys.MAX_SLOT)
+                {
+                    log.WriteError("spellbar set: slot {0} out of range 1 to {1}", slot, NamedKeys.MAX_SLOT);
+                    return;
+                }
+                // The verb takes 1-based slots to match the hotkeys; the API is 0-based.
+                _spellBar.RequestSet(slot - 1, spellId, SpellBar.DEFAULT_TAB);
+                return;
+            }
+            log.WriteError("spellbar: unrecognized subcommand '{0}'; expected 'clear' or 'set'", parts[0]);
+        }
+        private void CastCommandHandler(string command)
+        {
+            if (_spellBar == null)
+            {
+                log.WriteError("cast requested but no SpellBar is wired up");
+                return;
+            }
+            string arg = (command == null ? "" : command.Trim());
+            int slot = 0;
+            if (!int.TryParse(arg, out slot))
+            {
+                log.WriteError("cast: expected a slot number, got '{0}'", arg);
+                return;
+            }
+            _spellBar.RequestCast(slot);
         }
         private void AttackStopCommandHandler(string command)
         {

@@ -24,6 +24,7 @@ namespace ThwargFilter
         readonly Unwielder unwielder = new Unwielder();
         readonly Wielder wielder = new Wielder();
         readonly KeyDumper keyDumper = new KeyDumper();
+        readonly SpellBar spellBar = new SpellBar();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -62,6 +63,7 @@ namespace ThwargFilter
             ThwargFilterCommandParser.Unwield = unwielder;
             ThwargFilterCommandParser.Wield = wielder;
             ThwargFilterCommandParser.Keys = keyDumper;
+            ThwargFilterCommandParser.SpellBarManager = spellBar;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);

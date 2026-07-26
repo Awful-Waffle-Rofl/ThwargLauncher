@@ -459,6 +459,29 @@ server truth, and validators should cross-check against it for anything authorit
 **Out of scope:** abilities and points are server-custom and are readable only by chat
 readback. They are deliberately not in this snapshot.
 
+#### `spellbar`: the client spell bar
+
+How client-initiated casting is aimed. **CLIENT-INSTANT**: `CharacterFilter.SpellBar(tab)`
+is a local read.
+
+```json
+"spellbar": [
+  { "slot": 1, "spellId": 1234, "known": true,  "hotkey": "Digit1" },
+  { "slot": 2, "spellId": null, "known": null,  "hotkey": "Digit2" }
+],
+"spellbarTab": 0,
+"spellbarSlots": 7,
+"spellbarOccupied": 1,
+"spellbarTruthSource": "client-instant"
+```
+
+* Slots are reported **1-based**, matching the hotkeys that fire them. The underlying
+  Decal collection is 0-based; the oracle does that conversion so a rig never has to.
+* `spellId: null` is a **successful** read meaning the slot is empty, not a failure.
+* `known` is `CharacterFilter.IsSpellKnown(spellId)`, so a rig can tell "slot populated with
+  a spell this character cannot actually cast" from a usable slot.
+* `hotkey` is the key the `cast` verb would post for that slot.
+
 #### What `combatMode` is NOT
 
 `combatMode` is the **client's** belief. The filter cannot read the server's
@@ -635,6 +658,9 @@ client-side state into a chat line you can assert on.
 | `unwield` verb | `ThwargLauncher\ThwargFilter\Observation\Unwielder.cs` |
 | `wield` verb | `ThwargLauncher\ThwargFilter\Observation\Wielder.cs` |
 | equipped-set resolution shared by verbs | `ThwargLauncher\ThwargFilter\Observation\EquippedItems.cs` |
+| verified, self-healing combat mode | `ThwargLauncher\ThwargFilter\Observation\CombatModeSetter.cs` |
+| spell bar and client casting | `ThwargLauncher\ThwargFilter\Observation\SpellBar.cs` |
+| wielded weapon and the mode it implies | `ThwargLauncher\ThwargFilter\Observation\WieldedWeapon.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
@@ -980,6 +1006,98 @@ and the extended flag that a `WM_KEYDOWN` lParam actually wants. So: read the ke
 * Bindings are per-player. If the keymap differs from the table, set `AttackKey`
   accordingly.
 
+### Combat mode follows the wielded weapon
+
+**Combat mode is not an independently settable axis.** This is the single most important
+thing to know before automating anything combat-related:
+
+* The backtick key toggles **Peace <-> Combat**.
+* **Which** combat mode you get is **derived from the wielded weapon**:
+  wand, staff or orb gives Magic; bow or crossbow gives Missile; a melee weapon (or
+  nothing, for unarmed) gives Melee.
+
+A player cannot reach "melee mode while carrying a wand" at all, and the client says so
+outright: *"You can't enter melee mode while carrying a wand."*
+
+**So the rig sequence is always: wield the right weapon FIRST, then enter combat.** Never
+"set a mode, then wield". A `dumpstate` read of `state.equipment` tells you what is wielded
+before you try.
+
+This is very likely the real explanation for ledger **L6-76**, where `SetCombatMode`
+appeared to no-op in 2 runs out of 4: those were **mode/weapon mismatches, not a race**.
+Asking for a mode the wielded weapon cannot produce is a request the client can only refuse,
+and `SetCombatMode` has no failure channel to report the refusal.
+
+#### The ladder
+
+`Actions.CombatMode` is a same-process client-truth read, so the outcome can always be
+verified even though `SetCombatMode` cannot report failure.
+
+0. **Inspect.** Read `Actions.CombatMode` and the wielded weapon.
+   * Already in a combat mode that satisfies the goal: **done, no input at all**.
+   * Already in a *different* combat mode than a specific request: **fail fast**. Getting
+     there means changing weapon, which is the caller's job.
+   * Request inconsistent with the wielded weapon: **fail fast**, naming what to wield.
+1. **Optional `SetCombatMode`**, only when the request is consistent with the weapon, then
+   verify. Skipped entirely when the weapon class cannot be determined, in which case the
+   filter does what a player does and goes straight to the toggle.
+2. **Post Backtick** (the native toggle), verify. Up to 3 toggle attempts.
+
+Fail-fast matters: it turns an impossible request into an immediate, diagnosable error
+instead of a 20 second convergence timeout that ends in silence.
+
+Every verify logs the observed mode **alongside the wielded weapon**, so any future
+mismatch is self-evident in the log without cross-referencing a `dumpstate`.
+
+#### `attack` defaults to "any combat mode"
+
+Because the weapon decides, `AttackCombatMode` now defaults to **`Any`**: the attack verb
+only needs the client to be *in combat*, not in a particular mode. Setting it to `Melee`,
+`Missile` or `Magic` is still allowed and is then treated as a specific request with the
+fail-fast rules above; that is only useful when the rig is also controlling what is wielded.
+
+The attack input is withheld until the mode is settled, because a tap posted while the
+client is still in `Peace` does nothing.
+
+#### Fields in `AttackResult`
+
+| field | meaning |
+| --- | --- |
+| `combatModeRequested` | `"Any"`, or the specific mode requested |
+| `combatModeFinal` | the mode actually observed on the last verify |
+| `combatModeVerified` | `true` when the goal was met |
+| `combatModeWeapon` | what was wielded, so a mismatch is self-evident |
+| `combatModeImpossible` | `true` when the request was refused as impossible for that weapon |
+| `combatModeRetries` | toggle attempts beyond the first |
+| `combatModeUsedToggle` | `true` when Backtick was posted |
+| `combatModeUsedSetCombatMode` | `true` when the optional `SetCombatMode` rung ran |
+| `combatModeDetail` | short reason the ladder ended where it did |
+| `combatModeObserved` | the mode read at **each** verify, oldest first |
+
+```json
+"combatModeRequested":"Any","combatModeFinal":"Magic","combatModeVerified":true,
+"combatModeWeapon":"'Acid Wand' (WandStaffOrb -> Magic)","combatModeImpossible":false,
+"combatModeRetries":0,"combatModeUsedToggle":true,"combatModeUsedSetCombatMode":false,
+"combatModeDetail":"entered combat by Backtick toggle","combatModeObserved":["Peace","Magic"]
+```
+
+An impossible request reads unmistakably:
+
+```json
+"combatModeRequested":"Melee","combatModeFinal":"Peace","combatModeVerified":false,
+"combatModeImpossible":true,
+"combatModeDetail":"requested Melee but wielded item is 'Acid Wand' (WandStaffOrb), which produces Magic; wield a melee weapon (or nothing, for unarmed) first"
+```
+
+An unverified mode does **not** abort the attack. The input is still synthesized and the
+record carries `combatModeVerified: false`, because refusing outright would hide the failure
+from the harness.
+
+**Stale ladders self-clear.** The ladder only advances on render frames, so a client that
+stops rendering could otherwise leave it in flight forever and every later request would be
+rejected as busy. A ladder older than 5 seconds is abandoned (its original caller is told,
+not left hanging) and the new request takes over.
+
 ### Stopping, and stop latency
 
 `attackstop` releases any key still held and sets `CombatState.Peace`.
@@ -1279,3 +1397,109 @@ wield <caster>               await WieldResult outcome requested
 dumpstate                    confirm state.equipment shows the caster
 <enter combat>               mode follows the weapon, see section 10
 ```
+
+## 13. Client-side casting
+
+### Do not use server-side `/castspell` for cast mechanics
+
+**`/castspell` bypasses the client cast path entirely.** It skips the client's cast
+animation and fires far faster than the client would ever allow.
+
+That makes it **useless for any test that measures cast timing or exercises cast
+mechanics**, and it silently produces false negatives rather than errors. This is not
+theoretical: netherrush (void cast-speed stacking) never appeared to fire under server-side
+casts, which retroactively explains ledger rows **L6-52/53** marking netherrush and
+flatcastspeed "structurally unobservable". They were not unobservable. They modify exactly
+the path `/castspell` skips.
+
+| use case | use |
+| --- | --- |
+| cast speed, cast stacking, cast animation, anything timing-sensitive | **client casting** (this section) |
+| "did the spell land", "does the effect apply", bulk setup | `/castspell` is fine |
+
+### How client casting works here
+
+The client's own cast path is triggered by the numbered spell bar hotkeys. So: clear the
+bar, place the spells under test into known slots, and press the corresponding number. That
+is the native path, animations and timing included.
+
+### What Decal exposes for the spell bar
+
+All verified by reflection against the referenced `Decal.Adapter.dll` 2.9.7.5, and all
+present. This is **not** a blind-and-verify-by-effect situation:
+
+| purpose | member |
+| --- | --- |
+| read a bar | `CharacterFilter.SpellBar(int tab)` -> `ReadOnlyCollection<int>` of spell ids |
+| known spells | `CharacterFilter.SpellBook` -> `ReadOnlyCollection<int>` |
+| is a spell known | `CharacterFilter.IsSpellKnown(int)` |
+| add to a bar | `Actions.SpellTabAdd(int, int, int)` |
+| remove from a bar | `Actions.SpellTabDelete(int, int)` |
+| item shortcut bar | `CharacterFilter.Shortcut(int)` -> object id (items, not spells) |
+| change notifications | `ChangeSpellbar` (`Tab`, `Slot`, `SpellId`), `ChangeShortcut`, `SpellbookChange`, `SpellCast` |
+
+**Argument-order caveat.** The parameter order of `SpellTabAdd` and `SpellTabDelete` is
+undocumented and cannot be settled from the assembly. `ChangeSpellbarEventArgs` carries
+`Tab`, `Slot` and `SpellId`, which tells us the triple but not its order. Rather than guess,
+`spellbar set` **writes then reads the bar back**, and if the spell did not land it retries
+with the other plausible order and logs which one worked. The first live run therefore
+settles it. `spellbar clear` does the same for the two-argument delete.
+
+Note `Actions.CastSpell(int spellId, int targetId)` also exists. It is a client hook, so it
+may well go through the native path too, but it is **untested here** and the hotkey route is
+what the user specified. Worth a live comparison if the hotkey route proves awkward.
+
+### The verbs
+
+| command | effect |
+| --- | --- |
+| `spellbar clear` | remove every spell from the bar |
+| `spellbar set <slot> <spellId>` | place a spell in a slot (slots are 1-based, 1 to 10) |
+| `cast <slot>` | post that slot's hotkey, firing the native client cast |
+
+Slots 1 to 9 map to their own digit key; slot 10 maps to the `0` key. These are main-row
+digits, not the numpad, so none of them set the extended-key bit. An out-of-range slot is
+refused rather than guessed at.
+
+`spellbar set` warns (and proceeds) when the spell is not in the spellbook, so a rig sees
+the discrepancy rather than a silently useless slot.
+
+### `CastResult` record
+
+Every `cast` emits one line into `chatlog_<pid>.jsonl`:
+
+```json
+{"utc":"...","source":"filter","type":"CastResult","slot":3,"outcome":"requested",
+ "spellId":1234,"spellName":"spellId 1234","combatMode":"Magic","key":"Digit3"}
+```
+
+| field | meaning |
+| --- | --- |
+| `slot` | the requested 1-based slot |
+| `outcome` | `requested`, `failed` or `invalidslot` |
+| `spellId` / `spellName` | what the bar held in that slot, `null` if empty or unreadable |
+| `combatMode` | the **pre-cast** combat mode |
+| `key` | which hotkey was posted |
+
+`combatMode` is there because a cast issued from `Peace` will not fire. It is the field that
+shows that without a separate `dumpstate`.
+
+As with `attack`, `outcome: "requested"` means **the input was posted**, not that a spell was
+cast. Confirm the effect by target health, combat chat, or a `dumpstate` read.
+
+### Prerequisites the rig must satisfy
+
+These are **not** handled by the filter. A cast will silently do nothing if any is missing:
+
+1. **Magic combat mode, which means wielding a caster FIRST.** Combat mode is derived from
+   the wielded weapon (section 10): you get Magic by wielding a wand, staff or orb and then
+   toggling into combat with Backtick. There is no "set magic mode" call, and asking for one
+   while holding the wrong weapon is a request the client can only refuse. The keymap also
+   binds `DIK_END` to `CombatCastCurrentSpell` in MagicCombat mode.
+2. **A wand, staff or orb wielded.** Check `state.equipment` for a `WandStaffOrb`.
+3. **A target selected** for damage spells. Use `appraise <name>` or check
+   `state.selection`.
+4. **The spell present in the spellbook.** `state.spellbar[].known` reports this per slot.
+5. **Components**, which can be skipped server-side with `/requirecomps off`. Per ledger
+   **L6-43** the foci turned out to be a component-list *selector*, not a gate, so a focus
+   alone does not remove the component requirement.
