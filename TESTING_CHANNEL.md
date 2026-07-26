@@ -588,6 +588,8 @@ client-side state into a chat line you can assert on.
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
+| `unwield` verb | `ThwargLauncher\ThwargFilter\Observation\Unwielder.cs` |
+| equipped-set resolution shared by verbs | `ThwargLauncher\ThwargFilter\Observation\EquippedItems.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
@@ -1033,3 +1035,101 @@ internals (obfuscated and unstable).
 to come from the server (`source:"network"`) or from this filter's own verbs, which write
 structured records. Plugin chat output is not a supported observation channel, in any
 configuration, until somebody proves otherwise in game.
+
+
+---
+
+## 12. Freeing a hand: the `unwield` verb
+
+### Why this exists
+
+**There was no way to empty a character's hands from the command channel at all**, which
+blocked every loadout swap: no caster swap, no ammo swap, nothing. Verified in ACE source:
+
+* `/trywield` refuses while a hand is occupied (`Player_Inventory.cs`,
+  `CheckWeaponCollision`, `EquipMask.Held` refuses when mainhand or offhand is non-null).
+* Moving a wielded item between slots is blocked by `WieldedLocationIsAvailable`.
+* The remaining server-side dequip paths either drop the **entire** inventory on the ground
+  (`/fumble`) or require the item to be the client's **last-appraised** object.
+
+And that last route is closed too: **equipped items cannot be appraised.** The filter's
+`TargetResolver` scans landscape objects and players only, so an equipped shield resolves
+`notfound`.
+
+`unwield` sidesteps all of it by working **client side** and resolving the target from the
+**equipped set**, which already knows every wielded item, its id and its slot. The appraisal
+problem simply never arises.
+
+### The verb
+
+```
+unwield <name-substring>     e.g.  unwield shield
+unwield <slot>               e.g.  unwield 1
+```
+
+A target that parses as a plain integer is treated as a **wielding slot**, which is how a
+rig frees "whatever is in that hand" without knowing the item's name. Anything else is a
+case-insensitive name substring.
+
+Exactly one match is moved. **Zero or several move nothing** and report, on the same
+never-guess rule as `appraise` and `attack`: unwielding the wrong item silently changes the
+loadout a test is measuring.
+
+### The API, with argument order settled
+
+Verified by reflection **including parameter names**, which removes the guesswork entirely:
+
+```
+Decal.Adapter.Wrappers.HooksWrapper
+  MoveItem(Int32 objectId, Int32 destinationId)
+  MoveItem(Int32 objectId, Int32 destinationId, Int32 moveFlags)
+  MoveItem(Int32 objectId, Int32 packId, Int32 slot, Boolean stack)    <- used
+backed by Decal.Interop.Core.IACHooks
+  MoveItem(Int32 lObjectID, Int32 lPackID, Int32 lSlot, Boolean bStack)
+```
+
+The parameter names settle it: object first, then the destination **pack**, then the slot
+within that pack, then whether to stack.
+
+**The main pack's container id is the character's own id.** Not a guess: items sitting in
+the main pack carry `LongValueKey.Container` equal to the character id, which is exactly
+what `state.inventory[].container` reports. Slot `0` lets the client pick a free slot rather
+than fighting it for a specific one.
+
+**Dropping is deliberately not a fallback.** `Actions.DropItem` exists but litters the
+world, so it is never used here.
+
+### Verification and failure
+
+The move is verified by **re-reading the equipped set** on a later frame: if the item is no
+longer in it, the move worked. There is one retry, then the verb **reports rather than
+hangs**. A full pack is the likeliest cause of a genuine failure and the rig can act on it.
+
+### `UnwieldResult` record
+
+```json
+{"utc":"...","source":"filter","type":"UnwieldResult","target":"shield","outcome":"requested",
+ "resolvedId":100,"resolvedName":"Round Shield","objectClass":"Armor","fromSlot":2,
+ "wasWielded":true,"detail":"moved to pack"}
+```
+
+| field | meaning |
+| --- | --- |
+| `target` | the argument as given |
+| `outcome` | `requested`, `ambiguous`, `notfound` or `failed` |
+| `resolvedId` / `resolvedName` / `objectClass` | the item acted on, absent when nothing resolved |
+| `fromSlot` | the wielding slot it came out of, `null` for worn items |
+| `wasWielded` | `true` for hand items, `false` for worn armour or clothing |
+| `detail` | short reason, e.g. `still equipped after 2 attempts; pack may be full` |
+
+`outcome: "requested"` here is stronger than for `attack` or `cast`: it is only written
+**after** the item was confirmed gone from the equipped set.
+
+### Rig pattern: swapping to a caster
+
+```
+unwield <current weapon>     await UnwieldResult outcome requested
+/trywield <caster>           now succeeds, the hand is free
+dumpstate                    confirm state.equipment shows the caster
+<enter combat>               mode follows the weapon, see section 10
+```

@@ -21,6 +21,7 @@ namespace ThwargFilter
         readonly GameStateDumper gameStateDumper = new GameStateDumper();
         readonly Appraiser appraiser = new Appraiser();
         readonly Attacker attacker = new Attacker();
+        readonly Unwielder unwielder = new Unwielder();
 
         DefaultFirstCharacterManager defaultFirstCharacterManager;
         private LauncherChooseCharacterManager chooseCharacterManager;
@@ -56,6 +57,7 @@ namespace ThwargFilter
             ThwargFilterCommandParser.GameState = gameStateDumper;
             ThwargFilterCommandParser.Appraise = appraiser;
             ThwargFilterCommandParser.Attack = attacker;
+            ThwargFilterCommandParser.Unwield = unwielder;
 
             ClientDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ClientDispatch);
             ServerDispatch += new EventHandler<NetworkMessageEventArgs>(FilterCore_ServerDispatch);

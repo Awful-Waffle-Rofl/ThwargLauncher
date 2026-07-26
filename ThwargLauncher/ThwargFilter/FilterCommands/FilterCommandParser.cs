@@ -78,6 +78,10 @@ namespace ThwargFilter
         // whose name contains "stop", or silently resolve nothing.
         private const string CMD_AttackStop = "attackstop";
         private const string CMD_Attack = "attack";
+        // No prefix relationship with any existing verb: nothing registered is a prefix of
+        // "unwield" (note "unlockwindowposition"/"ulwp" share only the letter u), and
+        // "unwield" prefixes nothing.
+        private const string CMD_Unwield = "unwield";
         private ThwargInventory _thwargInventory;
         public ThwargInventory Inventory { set { _thwargInventory = value; } }
         private GameStateDumper _gameStateDumper;
@@ -86,6 +90,8 @@ namespace ThwargFilter
         public Appraiser Appraise { set { _appraiser = value; } }
         private Attacker _attacker;
         public Attacker Attack { set { _attacker = value; } }
+        private Unwielder _unwielder;
+        public Unwielder Unwield { set { _unwielder = value; } }
 
         public string GetTeamList() { return GetTeamStringList(); }
         private string GetTeamStringList()
@@ -137,6 +143,7 @@ namespace ThwargFilter
             // attackstop before attack: the matching loop breaks on the first prefix hit.
             cmdHandlers.Add(CMD_AttackStop, AttackStopCommandHandler, "Stop attacking and return to peace mode ('/tf attackstop')");
             cmdHandlers.Add(CMD_Attack, AttackCommandHandler, "Attack a named target ('/tf attack Drudge Skulker')");
+            cmdHandlers.Add(CMD_Unwield, UnwieldCommandHandler, "Move a worn or wielded item to the pack ('/tf unwield shield', '/tf unwield 1')");
         }
         public void ExecuteCommandFromLauncher(string command)
         {
@@ -184,6 +191,11 @@ namespace ThwargFilter
                 || IsCommandPrefix(command, "/tf " + CMD_Attack, out commandString))
             {
                 AttackCommandHandler(commandString);
+            }
+            else if (IsCommandPrefix(command, CMD_Unwield, out commandString)
+                || IsCommandPrefix(command, "/tf " + CMD_Unwield, out commandString))
+            {
+                UnwieldCommandHandler(commandString);
             }
             else
             {
@@ -286,6 +298,15 @@ namespace ThwargFilter
                 return;
             }
             _attacker.RequestAttack(command == null ? "" : command.Trim());
+        }
+        private void UnwieldCommandHandler(string command)
+        {
+            if (_unwielder == null)
+            {
+                log.WriteError("unwield requested but no Unwielder is wired up");
+                return;
+            }
+            _unwielder.RequestUnwield(command == null ? "" : command.Trim());
         }
         private void AttackStopCommandHandler(string command)
         {
