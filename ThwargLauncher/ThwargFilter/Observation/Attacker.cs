@@ -61,6 +61,7 @@ namespace ThwargFilter
         private const string METHOD_Both = "both";
 
         private object _locker = new object();
+        private CombatModeSetter _combatModeSetter = new CombatModeSetter();
         private Queue<string> _pendingTargets = new Queue<string>();
         private bool _stopPending;
         private bool _subscribed;
@@ -195,8 +196,7 @@ namespace ThwargFilter
                 {
                     TargetCandidate match = candidates[0];
                     log.WriteInfo("attack '{0}': matched {1}", trimmed, match.Describe());
-                    EngageTarget(match);
-                    WriteResult(trimmed, OUTCOME_Requested, match.Id, match.Name, 1);
+                    EngageTarget(trimmed, match);
                     return;
                 }
                 // Same rule as appraise: never guess. Attacking the wrong creature is
@@ -227,7 +227,7 @@ namespace ThwargFilter
         /// Each step is independently guarded so a later failure still leaves the earlier
         /// steps applied and logged.
         /// </summary>
-        private void EngageTarget(TargetCandidate match)
+        private void EngageTarget(string target, TargetCandidate match)
         {
             try
             {
@@ -240,17 +240,57 @@ namespace ThwargFilter
                 log.WriteError("attack: SelectItem({0}) failed: {1}", match.Id, exc);
             }
 
+            // The attack input is deliberately withheld until the combat mode is VERIFIED.
+            // A tap posted while the client is still in Peace does nothing, which is the
+            // most likely reading of the live runs where the filter logged a mode change
+            // that never landed and no attack followed.
             CombatState mode = GetConfiguredCombatMode();
-            try
+            AttackContinuation continuation = new AttackContinuation(this, target, match);
+            _combatModeSetter.EnsureCombatMode(mode, new CombatModeCallback(continuation.OnCombatModeSettled));
+        }
+
+        /// <summary>
+        /// Carries the target across the asynchronous combat-mode ladder so the input and
+        /// the AttackResult record can both happen once the mode has settled.
+        /// </summary>
+        private class AttackContinuation
+        {
+            private readonly Attacker _owner;
+            private readonly string _target;
+            private readonly TargetCandidate _match;
+
+            public AttackContinuation(Attacker owner, string target, TargetCandidate match)
             {
-                CoreManager.Current.Actions.SetCombatMode(mode);
-                log.WriteInfo("attack: combat mode set to {0}", mode);
-            }
-            catch (Exception exc)
-            {
-                log.WriteError("attack: SetCombatMode({0}) failed: {1}", mode, exc);
+                _owner = owner;
+                _target = target;
+                _match = match;
             }
 
+            public void OnCombatModeSettled(CombatModeResult result)
+            {
+                _owner.AfterCombatMode(_target, _match, result);
+            }
+        }
+
+        /// <summary>Runs on the game thread, once the combat mode ladder has settled.</summary>
+        private void AfterCombatMode(string target, TargetCandidate match, CombatModeResult modeResult)
+        {
+            if (!modeResult.Verified)
+            {
+                // Still fire the input: a wrong mode is not proof the attack cannot land,
+                // and refusing outright would hide the failure from the harness. The
+                // record carries the unverified mode so a validator can see it.
+                log.WriteError(
+                    "attack: proceeding with UNVERIFIED combat mode (wanted {0}, observed {1}): {2}",
+                    modeResult.Requested, modeResult.Final, modeResult.Detail);
+            }
+
+            SynthesizeAttackInput(match);
+            WriteResult(target, OUTCOME_Requested, match.Id, match.Name, 1, modeResult);
+        }
+
+        private void SynthesizeAttackInput(TargetCandidate match)
+        {
             string method = GetSetting(SETTING_AttackMethod, METHOD_Key).Trim().ToLower();
             if (method == METHOD_UseItem || method == METHOD_Both)
             {
@@ -276,11 +316,6 @@ namespace ThwargFilter
             }
         }
 
-        /// <summary>
-        /// Post the attack key down and schedule its release. One tap starts the client's
-        /// repeating attack loop, so this is a tap, not a sustained hold. The release runs
-        /// from a later render frame; sleeping here would block the game thread.
-        /// </summary>
         private void TapAttackKey()
         {
             NamedKey key = GetAttackKey();
@@ -412,6 +447,17 @@ namespace ThwargFilter
             string resolvedName,
             int candidateCount)
         {
+            WriteResult(target, outcome, resolvedId, resolvedName, candidateCount, null);
+        }
+
+        private static void WriteResult(
+            string target,
+            string outcome,
+            int resolvedId,
+            string resolvedName,
+            int candidateCount,
+            CombatModeResult modeResult)
+        {
             try
             {
                 Dictionary<string, object> entry = new Dictionary<string, object>();
@@ -428,6 +474,18 @@ namespace ThwargFilter
                 if (outcome == OUTCOME_Ambiguous)
                 {
                     entry["candidateCount"] = candidateCount;
+                }
+                if (modeResult != null)
+                {
+                    // So the harness can see the healing happen, and can tell a clean
+                    // first-attempt set from one that needed the Backtick rung.
+                    entry["combatModeRequested"] = modeResult.Requested.ToString();
+                    entry["combatModeFinal"] = modeResult.Final.ToString();
+                    entry["combatModeVerified"] = modeResult.Verified;
+                    entry["combatModeRetries"] = modeResult.Retries;
+                    entry["combatModeUsedToggle"] = modeResult.UsedToggle;
+                    entry["combatModeDetail"] = modeResult.Detail;
+                    entry["combatModeObserved"] = modeResult.Observed;
                 }
                 ChatLogWriter.WriteEntry(entry);
             }

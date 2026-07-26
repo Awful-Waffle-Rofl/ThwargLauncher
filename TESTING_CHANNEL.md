@@ -588,6 +588,7 @@ client-side state into a chat line you can assert on.
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
+| verified, self-healing combat mode | `ThwargLauncher\ThwargFilter\Observation\CombatModeSetter.cs` |
 | shared name-substring target resolution | `ThwargLauncher\ThwargFilter\Observation\TargetResolver.cs` |
 | smoke test fixture (no live client) | `tools\filter-smoke.ps1` |
 | event subscriptions | `ThwargLauncher\ThwargFilter\FilterCore.cs` |
@@ -932,6 +933,82 @@ and the extended flag that a `WM_KEYDOWN` lParam actually wants. So: read the ke
   ignore it.
 * Bindings are per-player. If the keymap differs from the table, set `AttackKey`
   accordingly.
+
+### Combat mode is set with verification and self-healing
+
+`Actions.SetCombatMode` has **no failure channel**. Live module self-tests found it
+silently no-opping in 2 runs out of 4: the filter logged "combat mode set to Melee" while
+`Actions.CombatMode` stayed `Peace` for a full 20 second window, and an externally posted
+Backtick recovered it within a second both times.
+
+`Actions.CombatMode` is a same-process client-truth read, so the set **can** be verified
+even though it cannot report failure. The attack verb now does exactly that, through a
+shared helper that future consumers (casting, for example) inherit.
+
+**The ladder**, each rung verified about 500 ms later on a render frame:
+
+1. `SetCombatMode`, verify
+2. `SetCombatMode` again, verify
+3. `SetCombatMode` again, verify (3 attempts total)
+4. post the **Backtick** key, which toggles combat mode natively, verify once
+
+**The attack input is withheld until the mode is settled.** A tap posted while the client
+is still in `Peace` does nothing, which is the most likely reading of the failed live runs.
+This means `attack` can take up to about two seconds longer when a mode change misbehaves;
+it is not slower on the healthy path.
+
+**The toggle rung is guarded.** Backtick *toggles* between Peace and combat; it cannot
+select between Melee, Missile and Magic. It is posted only when a toggle actually moves
+toward the goal:
+
+| observed | desired | toggle posted? |
+| --- | --- | --- |
+| `Peace` | any combat mode | yes, it enters combat |
+| any combat mode | `Peace` | yes, it leaves combat |
+| `Melee` | `Missile` (or any other combat-to-combat) | **no**, toggling would only reach Peace |
+| already correct | same | no |
+
+It is never posted blind. A refusal is logged with both the observed and the wanted mode.
+
+**Stale ladders self-clear.** The ladder only advances on render frames, so a client that
+stops rendering could otherwise leave it in flight forever and every later request would be
+rejected as busy. A ladder older than 5 seconds is abandoned (its original caller is told,
+rather than left hanging) and the new request takes over.
+
+#### Fields in `AttackResult`
+
+Every `attack` that resolves a target now carries the mode outcome, so the harness can see
+the healing happen:
+
+| field | meaning |
+| --- | --- |
+| `combatModeRequested` | the mode the verb wanted |
+| `combatModeFinal` | the mode actually observed on the last verify |
+| `combatModeVerified` | `true` when final matched requested |
+| `combatModeRetries` | extra `SetCombatMode` calls beyond the first; `0` on a clean set |
+| `combatModeUsedToggle` | `true` when the Backtick rung was needed |
+| `combatModeDetail` | short reason the ladder ended where it did |
+| `combatModeObserved` | the mode read at **each** verify, oldest first |
+
+```json
+{"utc":"...","source":"filter","type":"AttackResult","target":"drudge","outcome":"requested",
+ "resolvedId":1073741825,"resolvedName":"Drudge Skulker",
+ "combatModeRequested":"Melee","combatModeFinal":"Melee","combatModeVerified":true,
+ "combatModeRetries":1,"combatModeUsedToggle":false,
+ "combatModeDetail":"set verified after retry","combatModeObserved":["Peace","Melee"]}
+```
+
+`combatModeObserved` is the diagnostic that answers the open question in ledger L6-76:
+a leading `Peace` means the set **never landed**, whereas a correct mode followed by a
+wrong one would mean it **landed and then reverted**.
+
+An unverified mode does **not** abort the attack. The input is still synthesized and the
+record carries `combatModeVerified: false`, because a wrong mode is not proof the attack
+cannot land and refusing outright would hide the failure from the harness.
+
+**Escalation should now be rare.** If `combatModeRetries` is routinely above 0, or
+`combatModeUsedToggle` is routinely true, that is a signal worth investigating rather than
+normal operation.
 
 ### Stopping, and stop latency
 
