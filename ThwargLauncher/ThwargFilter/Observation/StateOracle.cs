@@ -32,12 +32,28 @@ namespace ThwargFilter
         //   Coverage      218103821  body coverage mask, carried by worn armour/clothing
         //   Container     218103810  id of the container this item sits in
         //   Type          218103808  the WEENIE CLASS ID (wcid), see AddInventory
+        //   EquippedSlots 10         slot mask, present ONLY while the item is equipped
+        //
+        // EQUIPPED TEST, settled by an A/B probe on one quarrel stack across a single
+        // equip toggle:
+        //   unequipped -> Wielder key ABSENT, EquippedSlots key ABSENT
+        //   equipped   -> Wielder = 0, EquippedSlots = 0x800000 (MissileAmmo)
+        //   equipped weapon -> Wielder = the CHARACTER ID
+        // So an item is equipped iff it CARRIES the Wielder key at all; the VALUE is the
+        // character id for weapons but ZERO for ammunition. The old test compared the value
+        // against the character id, which silently excluded every ammo stack.
+        // EquippedSlots corroborates and also names the slot.
         // Wielder is the discriminator for wielded gear. Worn armour and clothing turned
         // out NOT to carry Wielder client-side (live: withCoverage 10 vs withWielder 2),
         // so the equipped set is the union of "wielded by me" and "carries Coverage but
         // sits in no container". The container test matters: a spare shirt in a pack also
         // carries Coverage, and without it packed clothing would be reported as worn.
         private const int MAX_EQUIPMENT_ENTRIES = 40;
+        /// <summary>
+        /// EquipMask.MissileAmmo, verified against ACE EquipMask.cs:35 and confirmed live:
+        /// an equipped quarrel stack reported EquippedSlots = 8388608 = 0x800000.
+        /// </summary>
+        private const int MASK_MissileAmmo = 0x00800000;
         private const int MAX_INVENTORY_ENTRIES = 200;
         private const int MAX_ENCHANTMENT_IDS = 100;
 
@@ -161,29 +177,42 @@ namespace ThwargFilter
                     if (TryGetLong(wo, LongValueKey.Coverage, out coverage)) { item["coverage"] = coverage; }
                     else { item["coverage"] = null; }
 
-                    // How this item qualified as equipped, so a validator can filter to
-                    // hand slots (the live-confirmed set) without guessing from the shape.
+                    // How this item qualified, plus the raw values, because the Wielder
+                    // VALUE differs by item kind: the character id for a weapon, 0 for
+                    // ammunition. wielderValue 0 with equippedSlots 0x800000 IS the ammo
+                    // signature.
                     int wielderOf = 0;
-                    bool byWielder = TryGetLong(wo, LongValueKey.Wielder, out wielderOf) && wielderOf == playerId;
-                    item["equippedVia"] = (byWielder ? "wielder" : "coverage");
+                    bool byWielder = TryGetLong(wo, LongValueKey.Wielder, out wielderOf);
+                    int slotsOf = 0;
+                    bool bySlots = TryGetLong(wo, LongValueKey.EquippedSlots, out slotsOf) && slotsOf != 0;
+                    item["wielderValue"] = (byWielder ? (object)wielderOf : null);
+                    item["equippedSlots"] = (bySlots ? (object)slotsOf : null);
+                    item["equippedVia"] = (byWielder ? "wielder" : (bySlots ? "equippedSlots" : "coverage"));
 
                     item["type"] = TryGetLongOrNull(wo, LongValueKey.Type);
 
                     int stack = 0;
-                    if (TryGetLong(wo, LongValueKey.StackCount, out stack))
+                    bool hasStack = TryGetLong(wo, LongValueKey.StackCount, out stack);
+                    if (hasStack) { item["stackCount"] = stack; }
+
+                    // AMMO IS NOW A LOOKUP, NOT A HEURISTIC. Equipped ammunition is the
+                    // equipped item whose EquippedSlots is MissileAmmo (0x800000). The
+                    // fallback (a stack whose Wielder value is 0) covers a client that
+                    // reports the key without the mask.
+                    bool isAmmoBySlot = (bySlots && slotsOf == MASK_MissileAmmo);
+                    bool isAmmoByShape = (hasStack && byWielder && wielderOf == 0);
+                    if (isAmmoBySlot || isAmmoByShape)
                     {
-                        item["stackCount"] = stack;
-                        // Ammo is the wielded thing that stacks. Weapons and armour do not
-                        // carry StackCount, so this separates arrows from the bow without
-                        // relying on an object class that Decal does not distinguish.
                         ammoCandidates++;
                         if (ammo == null)
                         {
                             ammo = new Dictionary<string, object>();
                             ammo["id"] = item["id"];
                             ammo["name"] = item["name"];
-                            ammo["stackCount"] = stack;
-                            ammo["wieldingSlot"] = item["wieldingSlot"];
+                            ammo["stackCount"] = (hasStack ? (object)stack : null);
+                            ammo["equippedSlots"] = (bySlots ? (object)slotsOf : null);
+                            ammo["wielderValue"] = (byWielder ? (object)wielderOf : null);
+                            ammo["matchedBy"] = (isAmmoBySlot ? "equippedSlots==MissileAmmo" : "stack with wielder 0");
                         }
                     }
                     equipment.Add(item);
@@ -192,8 +221,20 @@ namespace ThwargFilter
                 oracle["equipment"] = equipment;
                 oracle["equipmentCount"] = equipment.Count;
                 if (truncated) { oracle["equipmentTruncated"] = true; }
-                // null means "read succeeded, nothing equipped that stacks", which is the
-                // arrows-ran-out signal. It is NOT the same as "unavailable".
+
+                // RETRACTED HEURISTIC. This used to report "the wielded item carrying a
+                // StackCount", with null meaning "nothing equipped that stacks". Live
+                // evidence proves that heuristic CANNOT work: with 561 Quarrels showing in
+                // the client's ammunition indicator, the oracle saw wieldedByMe = 1 (the
+                // sword alone) and the quarrel stack among the 26 CONTAINED objects. So
+                // equipped ammunition does NOT carry Wielder == me, exactly like worn
+                // clothing, and a Wielder-gated scan can never see it.
+                //
+                // Reporting null here would assert "there is no equipped ammo", which is
+                // false whenever ammo IS equipped. Until the discriminator is identified
+                // (see the dumpkeys probe), the honest answer is that we do not know.
+                // null here now means a genuine "nothing in the ammo slot", because the
+                // discriminator is known rather than guessed.
                 oracle["ammo"] = ammo;
                 if (ammoCandidates > 1) { oracle["ammoCandidates"] = ammoCandidates; }
             }
@@ -221,6 +262,10 @@ namespace ThwargFilter
             public List<WorldObject> Contained = new List<WorldObject>();
             public int Total;
             public int WithWielder;
+            /// <summary>Wielder key PRESENT, whatever its value. The equipped test.</summary>
+            public int WithWielderKey;
+            /// <summary>Non-zero EquippedSlots: corroborates equipped and names the slot.</summary>
+            public int WithEquippedSlots;
             public int WithCoverage;
             public int WithCoverageNoContainer;
             public bool Read;
@@ -249,8 +294,16 @@ namespace ThwargFilter
                     }
 
                     int wielder = 0;
-                    bool wieldedByMe = TryGetLong(wo, LongValueKey.Wielder, out wielder) && wielder == playerId;
+                    // PRESENCE, not value: ammunition carries Wielder = 0 when equipped.
+                    bool hasWielderKey = TryGetLong(wo, LongValueKey.Wielder, out wielder);
+                    int equippedSlots = 0;
+                    bool hasEquippedSlots = TryGetLong(wo, LongValueKey.EquippedSlots, out equippedSlots)
+                        && equippedSlots != 0;
+                    bool wieldedByMe = hasWielderKey || hasEquippedSlots;
+
+                    if (hasWielderKey) { result.WithWielderKey++; }
                     if (wielder != 0) { result.WithWielder++; }
+                    if (hasEquippedSlots) { result.WithEquippedSlots++; }
 
                     if (wieldedByMe)
                     {
@@ -357,6 +410,11 @@ namespace ThwargFilter
             entry["read"] = scan.Read;
             entry["total"] = scan.Total;
             entry["withWielder"] = scan.WithWielder;
+            // withWielderKey is the count that drives the equipped test now. If it ever
+            // greatly exceeds the number of things actually equipped, the presence test is
+            // over-matching and this is the field that shows it.
+            entry["withWielderKey"] = scan.WithWielderKey;
+            entry["withEquippedSlots"] = scan.WithEquippedSlots;
             entry["withCoverage"] = scan.WithCoverage;
             entry["withCoverageNoContainer"] = scan.WithCoverageNoContainer;
             entry["equippedUnion"] = scan.Equipped.Count;

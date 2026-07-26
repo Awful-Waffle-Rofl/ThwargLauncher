@@ -112,6 +112,13 @@ namespace ThwargFilter
             return GetRunningFilepath(string.Format("chatlog_{0}.1.jsonl", CurrentProcessId));
         }
         /// <summary>
+        /// Full property-bag dump written by the "dumpkeys" probe (JSON, full overwrite).
+        /// </summary>
+        public static string GetObjectKeysFilepath()
+        {
+            return GetRunningFilepath(string.Format("objectkeys_{0}.json", CurrentProcessId));
+        }
+        /// <summary>
         /// Game state snapshot written by the "dumpstate" verb (JSON, full overwrite).
         /// </summary>
         public static string GetGameStateFilepath()

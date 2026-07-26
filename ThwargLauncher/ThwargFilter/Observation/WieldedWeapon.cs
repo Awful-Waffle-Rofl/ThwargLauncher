@@ -74,9 +74,16 @@ namespace ThwargFilter
                 foreach (WorldObject wo in owned)
                 {
                     if (wo == null) { continue; }
+                    // Equipped test: PRESENCE of Wielder, not its value - equipped ammunition
+                    // carries Wielder == 0 (or no Wielder key at all), so comparing it to
+                    // playerId silently excluded ammo. EquippedSlots corroborates and covers
+                    // the no-Wielder-key case. Same discriminator as StateOracle.
                     int wielder = 0;
-                    if (!TryGetLong(wo, LongValueKey.Wielder, out wielder)) { continue; }
-                    if (wielder != playerId) { continue; }
+                    bool hasWielder = TryGetLong(wo, LongValueKey.Wielder, out wielder);
+                    int equippedSlots = 0;
+                    bool hasEquippedSlots = TryGetLong(wo, LongValueKey.EquippedSlots, out equippedSlots)
+                        && equippedSlots != 0;
+                    if (!hasWielder && !hasEquippedSlots) { continue; }
                     string objectClass = SafeObjectClass(wo);
                     int rank = RankOf(objectClass);
                     if (rank < bestRank)

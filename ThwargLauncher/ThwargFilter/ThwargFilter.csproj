@@ -93,9 +93,13 @@
     <Compile Include="FilterCommands\FilterCommandParser.cs" />
     <Compile Include="Observation\Appraiser.cs" />
     <Compile Include="Observation\Attacker.cs" />
+    <Compile Include="Observation\EquippedItems.cs" />
+    <Compile Include="Observation\KeyDumper.cs" />
     <Compile Include="Observation\SpellBar.cs" />
     <Compile Include="Observation\WieldedWeapon.cs" />
     <Compile Include="Observation\StateOracle.cs" />
+    <Compile Include="Observation\Unwielder.cs" />
+    <Compile Include="Observation\Wielder.cs" />
     <Compile Include="Observation\TargetResolver.cs" />
     <Compile Include="Observation\ChatLogWriter.cs" />
     <Compile Include="Observation\ChatObserver.cs" />

@@ -303,12 +303,14 @@ server last told it, which can be stale.
   items did **not** appear in the client-side scan. So the client-side `Wielder` key appears
   to cover **wielded items only, not worn armour or clothing**.
 
-  **Resolved.** The diagnostics run settled it: `withCoverage` 10 against `withWielder` 2
-  proved the worn items were present in the collection all along and merely lacked the
-  client-side `Wielder` key. `equipment` is now the **union** of two tests:
+  **Resolved, then corrected.** `equipment` is the **union** of:
 
-  1. `Wielder` equals this character (wielded gear, live-confirmed), or
-  2. the item carries `Coverage` **and sits in no container** (worn armour and clothing).
+  1. the item **carries the `Wielder` key at all** (equipped gear), or
+  2. the item has a non-zero `EquippedSlots` (corroborates, and names the slot), or
+  3. the item carries `Coverage` **and sits in no container** (worn armour and clothing).
+
+  Test 1 checks **key presence, not the value** - see the asymmetry below, which is the
+  single most likely thing to trip anyone reading raw keys.
 
   The container test in (2) is load-bearing and is not optional: a spare shirt in a pack
   also carries `Coverage`, so without it packed clothing would be reported as worn. That
@@ -336,12 +338,12 @@ server last told it, which can be stale.
   key, and the filter could be widened to include them. `inventory` is `null` when the
   fallback scan never ran.
 
-* **`ammo`** is derived, not a separate query: it is the wielded item that carries a
-  `StackCount`. Weapons and armour do not stack, so this separates arrows from the bow
-  without relying on an object class, which Decal does not distinguish for ammunition
-  (there is no `ObjectClass.Ammo`; arrows and bows are both `MissileWeapon`).
-  **This is a heuristic**, stated plainly. If more than one wielded item stacks, the first
-  is reported and `ammoCandidates` gives the count.
+* **`ammo`** is a **lookup, not a heuristic** (this was corrected after a live A/B probe;
+  see "How equipped is actually detected" below). Equipped ammunition is the equipped item
+  whose `EquippedSlots` is `0x800000` (`EquipMask.MissileAmmo`). A fallback also accepts an
+  equipped stack whose `Wielder` **value** is `0`, for a client that reports the key without
+  the mask. `ammo: null` now genuinely means "nothing in the ammo slot". `ammoCandidates`
+  reports ties.
 
 * **`combatMode`** is `Actions.CombatMode`, the same value the `attack` verb sets via
   `SetCombatMode`. Values are `Peace`(1), `Melee`(2), `Missile`(4), `Magic`(8).
@@ -351,6 +353,48 @@ server last told it, which can be stale.
   read meaning nothing is selected. **Negative id caveat:** Decal exposes object ids as
   `Int32`, so genuine AC GUIDs above 2^31 appear **negative**. A validator matching ids
   must expect negative values; do not treat a negative id as an error.
+
+#### How "equipped" is actually detected (verified by A/B probe)
+
+This was settled empirically with the `itemkeys` probe, on **one quarrel stack across a
+single equip toggle**, so it is a controlled A/B rather than an inference:
+
+| state | `Wielder` key | `EquippedSlots` key |
+| --- | --- | --- |
+| ammo **unequipped** | **absent** | **absent** |
+| ammo **equipped** | present, **value `0`** | present, `0x800000` (`MissileAmmo`) |
+| weapon **equipped** | present, value = **character id** | present, weapon slot mask |
+
+**An item is equipped iff it carries the `Wielder` key at all. The VALUE is the character
+id for weapons but ZERO for ammunition.**
+
+> **This asymmetry is the trap.** The filter originally tested `Wielder == characterId`,
+> which is true for weapons and false for ammunition, so **every ammo stack was silently
+> excluded from the equipped set**. The symptom was `ammo: null` while the client's own
+> ammunition indicator showed 611 Quarrels. If you read raw keys and see `wielder = 0`, that
+> does **not** mean "not wielded" - it means "equipped ammunition".
+
+Two further consequences worth holding onto:
+
+* **Equipped ammunition still carries `Container` == the character id**, exactly like a pack
+  item. So a container test cannot distinguish equipped ammo from packed ammo; only the
+  `Wielder`/`EquippedSlots` keys can.
+* **`EquipableSlots` and `EquippedSlots` are different keys** and this distinction is the
+  whole puzzle:
+  * `EquipableSlots` (218103822) - where the item **can** go. Present whether or not it is
+    equipped. This is what the `wield` verb uses to pick a slot mask.
+  * `EquippedSlots` (10) - where the item **currently is**. Present **only while equipped**.
+    Note the bare value `10`: it sits in a different key space from the `2181038xx` block,
+    which is why it looks like a decoy until you need it.
+
+Each `equipment` entry therefore reports `equippedVia` (`wielder`, `equippedSlots` or
+`coverage`), plus the raw `wielderValue` and `equippedSlots`, so a caller can tell a weapon
+from ammunition without re-deriving any of this. `equipmentDiagnostics` also reports
+`withWielderKey` (presence, which drives the test) alongside `withWielder` (non-zero value),
+so an over-matching presence test would be visible immediately.
+
+**Self-test after any change here:** `unwield id:<ammo-id>` used to return `notfound` for
+equipped ammunition, because the equipped set could not see it. It must now find it.
 
 #### `inventory`: pack contents
 
@@ -611,6 +655,9 @@ client-side state into a chat line you can assert on.
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |
+| `unwield` verb | `ThwargLauncher\ThwargFilter\Observation\Unwielder.cs` |
+| `wield` verb | `ThwargLauncher\ThwargFilter\Observation\Wielder.cs` |
+| equipped-set resolution shared by verbs | `ThwargLauncher\ThwargFilter\Observation\EquippedItems.cs` |
 | verified, self-healing combat mode | `ThwargLauncher\ThwargFilter\Observation\CombatModeSetter.cs` |
 | spell bar and client casting | `ThwargLauncher\ThwargFilter\Observation\SpellBar.cs` |
 | wielded weapon and the mode it implies | `ThwargLauncher\ThwargFilter\Observation\WieldedWeapon.cs` |
@@ -1155,7 +1202,203 @@ configuration, until somebody proves otherwise in game.
 
 ---
 
-## 12. Client-side casting
+## 11b. `itemkeys`: the probe that settles key questions
+
+```
+itemkeys <name-substring>     itemkeys quarrel
+itemkeys <wcid>               itemkeys 31716
+itemkeys id:<id>              itemkeys id:-2147481121
+```
+
+Dumps **every** property the client holds for matching objects: all `LongKeys` with values
+(named via the `LongValueKey` enum where they map, `unnamed(N)` where they do not), plus
+`BoolKeys`, `DoubleKeys`, `StringKeys`, and a `named` convenience block pulling out
+`Container`, `Wielder`, `WieldingSlot`, `EquippedSlots`, `EquipableSlots`, `EquipType`,
+`Coverage`, `StackCount`, `MissileType`, `UsageMask`, `SlotLegacy`, `ItemSlots` and `Type`.
+
+Output goes to three places so whichever suits the task wins:
+
+* the filter log, one line per key, for eyeball diffing;
+* an `ItemKeys` record in `chatlog_<pid>.jsonl`, for programmatic diffing;
+* `objectkeys_<pid>.json`, full overwrite, for a side-by-side file diff.
+
+**The method that works:** produce state A, dump, toggle one thing, dump again, diff. That
+is exactly how the equipped-ammo discriminator above was found, after reasoning from
+documentation had failed. When a question is "which key means X", do not theorise - probe.
+`dumpkeys` is accepted as an alias.
+
+## 12. Freeing a hand: the `unwield` verb
+
+### Why this exists
+
+**There was no way to empty a character's hands from the command channel at all**, which
+blocked every loadout swap: no caster swap, no ammo swap, nothing. Verified in ACE source:
+
+* `/trywield` refuses while a hand is occupied (`Player_Inventory.cs`,
+  `CheckWeaponCollision`, `EquipMask.Held` refuses when mainhand or offhand is non-null).
+* Moving a wielded item between slots is blocked by `WieldedLocationIsAvailable`.
+* The remaining server-side dequip paths either drop the **entire** inventory on the ground
+  (`/fumble`) or require the item to be the client's **last-appraised** object.
+
+And that last route is closed too: **equipped items cannot be appraised.** The filter's
+`TargetResolver` scans landscape objects and players only, so an equipped shield resolves
+`notfound`.
+
+`unwield` sidesteps all of it by working **client side** and resolving the target from the
+**equipped set**, which already knows every wielded item, its id and its slot. The appraisal
+problem simply never arises.
+
+### The verb
+
+```
+unwield <name-substring>     e.g.  unwield shield
+unwield <slot>               e.g.  unwield 1
+```
+
+A target that parses as a plain integer is treated as a **wielding slot**, which is how a
+rig frees "whatever is in that hand" without knowing the item's name. Anything else is a
+case-insensitive name substring.
+
+Exactly one match is moved. **Zero or several move nothing** and report, on the same
+never-guess rule as `appraise` and `attack`: unwielding the wrong item silently changes the
+loadout a test is measuring.
+
+### The API, with argument order settled
+
+Verified by reflection **including parameter names**, which removes the guesswork entirely:
+
+```
+Decal.Adapter.Wrappers.HooksWrapper
+  MoveItem(Int32 objectId, Int32 destinationId)
+  MoveItem(Int32 objectId, Int32 destinationId, Int32 moveFlags)
+  MoveItem(Int32 objectId, Int32 packId, Int32 slot, Boolean stack)    <- used
+backed by Decal.Interop.Core.IACHooks
+  MoveItem(Int32 lObjectID, Int32 lPackID, Int32 lSlot, Boolean bStack)
+```
+
+The parameter names settle it: object first, then the destination **pack**, then the slot
+within that pack, then whether to stack.
+
+**The main pack's container id is the character's own id.** Not a guess: items sitting in
+the main pack carry `LongValueKey.Container` equal to the character id, which is exactly
+what `state.inventory[].container` reports. Slot `0` lets the client pick a free slot rather
+than fighting it for a specific one.
+
+**Dropping is deliberately not a fallback.** `Actions.DropItem` exists but litters the
+world, so it is never used here.
+
+### Verification and failure
+
+The move is verified by **re-reading the equipped set** on a later frame: if the item is no
+longer in it, the move worked. There is one retry, then the verb **reports rather than
+hangs**. A full pack is the likeliest cause of a genuine failure and the rig can act on it.
+
+### `UnwieldResult` record
+
+```json
+{"utc":"...","source":"filter","type":"UnwieldResult","target":"shield","outcome":"requested",
+ "resolvedId":100,"resolvedName":"Round Shield","objectClass":"Armor","fromSlot":2,
+ "wasWielded":true,"detail":"moved to pack"}
+```
+
+| field | meaning |
+| --- | --- |
+| `target` | the argument as given |
+| `outcome` | `requested`, `ambiguous`, `notfound` or `failed` |
+| `resolvedId` / `resolvedName` / `objectClass` | the item acted on, absent when nothing resolved |
+| `fromSlot` | the wielding slot it came out of, `null` for worn items |
+| `wasWielded` | `true` for hand items, `false` for worn armour or clothing |
+| `detail` | short reason, e.g. `still equipped after 2 attempts; pack may be full` |
+
+`outcome: "requested"` here is stronger than for `attack` or `cast`: it is only written
+**after** the item was confirmed gone from the equipped set.
+
+### The `wield` verb: equip from the pack
+
+The counterpart to `unwield`, and the answer to two independent dead ends:
+
+* **No available server command can put ammunition into the ammo slot on this build.**
+  `/trywield` with correct bare-hex guids taken from the server's own `/ci` audit lines
+  produced **no message and no effect**, for Arrow (wcid 300) and Quarrel (31716), with and
+  without a matching launcher wielded. Missile rigs were impossible.
+* **`/ub useip` is not deterministic.** It was observed to silently no-op, unequip, or swap
+  depending on state, and all three are indistinguishable from chat.
+
+```
+wield <name-substring> [slot]     wield yumi        wield yumi 2
+wield <wcid> [slot]               wield 300         wield 300 2
+```
+
+A bare integer target is a **wcid**, which is what makes ammunition addressable: the module
+lane's Arrow is `wield 300`, Quarrel is `wield 31716`. An optional trailing integer is the
+slot, so multi-word names still work (`wield Deadly Frog Crotch Arrow`).
+
+> **Note the deliberate asymmetry with `unwield`:** a bare integer means a **slot** for
+> `unwield` and a **wcid** for `wield`. You unwield *from a place you know*; you wield *an
+> item you know*. Both are documented on their own verb and both are logged, so the
+> resolution path is always visible in the record.
+
+Exactly one match is equipped. Zero or several equip nothing and report, the same never-guess
+rule as everywhere else, and specifically the failure mode that made `/ub useip` unusable.
+
+#### The API
+
+Verified by reflection **including parameter names**:
+
+```
+HooksWrapper.AutoWield(Int32 item)
+HooksWrapper.AutoWield(Int32 item, Int32 slot, Int32 explic, Int32 notexplic)
+HooksWrapper.AutoWield(Int32 item, Int32 slot, Int32 explic, Int32 notexplic, Int32 zero1, Int32 zero2)
+  backed by IACHooks.AutoWield / AutoWieldEx / AutoWieldRaw
+```
+
+`AutoWield` is a **dedicated equip member**, so this is not a `MoveItem` trick. `MoveItem`'s
+destination parameter is literally named `packId`, and there is **no `EquipMask`-style enum
+anywhere in `Decal.Adapter`**, so an equipment slot is not expressible as a `MoveItem`
+destination at all. Being a client hook, `AutoWield` is almost certainly what `/ub useip`
+ultimately drives; the difference is that this verb **verifies the outcome** instead of
+leaving a no-op indistinguishable from a success.
+
+#### Verification, and the ammo question it settles
+
+The wield is confirmed by **re-reading the equipped set** on a later frame. One retry, then
+it reports `failed` with a `detail` naming the likely cause (slot occupied: `unwield` first).
+
+`outcome: "requested"` is written **only after the item is confirmed present in equipment**.
+
+The record also reports what keys the item ended up carrying, which **settles the open
+question of whether equipped ammunition is Wielder-linked client side** - something the
+oracle could previously only guess at:
+
+```json
+{"utc":"...","source":"filter","type":"WieldResult","target":"300","outcome":"requested",
+ "resolvedId":201,"resolvedName":"Deadly Frog Crotch Arrow","objectClass":"MissileWeapon",
+ "wcid":300,"stackCount":250,"equippedAfter":true,"wieldingSlot":3,
+ "carriesWielder":true,"carriesCoverage":false,"looksLikeAmmo":true,"detail":"equipped"}
+```
+
+| field | meaning |
+| --- | --- |
+| `wcid` / `stackCount` | from the inventory entry before the move |
+| `equippedAfter` | whether the item is in the equipped set after the attempt |
+| `wieldingSlot` | the slot it actually landed in |
+| `carriesWielder` | **the ammo answer**: does the equipped item carry `Wielder`? |
+| `carriesCoverage` | does it carry a `Coverage` mask instead? |
+| `looksLikeAmmo` | would the oracle's ammo heuristic (wielded plus a stack) fire? |
+
+If `carriesWielder` comes back `false` for ammunition on a live run, the oracle's `ammo`
+heuristic needs widening and this record is the evidence for it.
+
+### Rig pattern: swapping to a caster
+
+```
+unwield <current weapon>     await UnwieldResult outcome requested
+wield <caster>               await WieldResult outcome requested
+dumpstate                    confirm state.equipment shows the caster
+<enter combat>               mode follows the weapon, see section 10
+```
+
+## 13. Client-side casting
 
 ### Do not use server-side `/castspell` for cast mechanics
 
