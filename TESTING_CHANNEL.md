@@ -203,6 +203,131 @@ Field notes:
   taken at the character select screen produces a valid file whose `notes` explain what was
   missing.
 
+### The `state` section: the state oracle
+
+`dumpstate` also emits a `state` object. This is the sub-second deterministic answer to
+"what state am I in" for rig validation: the questions with **no other fast truth source**,
+since the shard DB lags minutes and chat says nothing about them.
+
+```json
+"state": {
+  "equipmentSource": "GetByOwner",
+  "equipment": [
+    { "id": 1073741830, "name": "Yumi", "objectClass": "MissileWeapon", "wieldingSlot": 1, "stackCount": null },
+    { "id": 1073741831, "name": "Deadly Frog Crotch Arrow", "objectClass": "MissileWeapon", "wieldingSlot": 2, "stackCount": 87 }
+  ],
+  "equipmentCount": 2,
+  "ammo": { "id": 1073741831, "name": "Deadly Frog Crotch Arrow", "stackCount": 87, "wieldingSlot": 2 },
+  "combatMode": { "value": 4, "name": "Missile", "truthSource": "client" },
+  "stance": "unavailable: not exposed client-side (server CurrentMotionState is not readable from a filter)",
+  "selection": { "id": 1073741900, "hasSelection": true, "name": "Drudge Skulker" }
+}
+```
+
+#### The three-way contract every field obeys
+
+This is what the deterministic-validation layer consumes, so it is a contract, not a
+convention:
+
+| shape | meaning |
+| --- | --- |
+| a value | the read succeeded, this is the answer |
+| `null` | the read succeeded and the answer is genuinely "nothing" |
+| `"unavailable: <reason>"` | the read **failed**; the answer is unknown |
+
+A validator must never confuse **empty hand** with **could not read the hand**. So
+`equipment: []` means "nothing equipped" while `equipment: "unavailable: ..."` means the
+scan failed, and `ammo: null` means "nothing equipped that stacks" (the arrows-ran-out
+signal) while `ammo: "unavailable: ..."` means unknown. A failed section is never silently
+omitted and never collapses to an empty list.
+
+#### Fields and their truth source
+
+| field | truth source | notes |
+| --- | --- | --- |
+| `equipment[]` | **client-instant** | items whose `Wielder` is this character |
+| `equipment[].id` / `.name` / `.objectClass` | client-instant | `WorldObject.Id` / `.Name` / `.ObjectClass` |
+| `equipment[].wieldingSlot` | client-instant | `LongValueKey.WieldingSlot` (218103819); `null` if the item does not carry it |
+| `equipment[].stackCount` | client-instant | `LongValueKey.StackCount` (218103814); `null` on non-stacking items |
+| `ammo` | client-instant | derived, see below |
+| `combatMode` | **client-instant, client-only** | `Actions.CombatMode`; see the stance caveat |
+| `stance` | not available | always `unavailable`, see below |
+| `selection` | client-instant | `Actions.CurrentSelection` |
+| `position` (top level) | client-instant | read at snapshot time |
+| `vitals` (top level) | **client-cached** | can lag the server, see caveats |
+
+"client-instant" means the client knows it locally and the read reflects the client's
+current belief with no round trip. "client-cached" means the client is holding a value the
+server last told it, which can be stale.
+
+#### How each field is derived
+
+* **`equipment`** is every object whose `LongValueKey.Wielder` (218103818) equals this
+  character's id. `Wielder` is the discriminator that separates worn/wielded gear from
+  things merely carried: an item sitting in a pack carries `Container` instead. That is why
+  the scan does not need to walk pack contents.
+
+  **Cost.** The scan is scoped to wielded-only via `WorldFilter.GetByOwner(playerId)`, not
+  `GetInventory()`. `GetInventory()` walks everything the character carries including pack
+  contents, which is the expensive shape for a 1 to 2 second poll. If `GetByOwner` yields
+  no wielded items at all, the scan retries once through `GetInventory()`, because an empty
+  result there is ambiguous between "nothing equipped" and "that query is not populated";
+  the `Wielder` filter makes both sources produce the same answer. `equipmentSource` tells
+  you which one produced the result. Capped at 40 entries with `equipmentTruncated` if hit.
+
+* **`ammo`** is derived, not a separate query: it is the wielded item that carries a
+  `StackCount`. Weapons and armour do not stack, so this separates arrows from the bow
+  without relying on an object class, which Decal does not distinguish for ammunition
+  (there is no `ObjectClass.Ammo`; arrows and bows are both `MissileWeapon`).
+  **This is a heuristic**, stated plainly. If more than one wielded item stacks, the first
+  is reported and `ammoCandidates` gives the count.
+
+* **`combatMode`** is `Actions.CombatMode`, the same value the `attack` verb sets via
+  `SetCombatMode`. Values are `Peace`(1), `Melee`(2), `Missile`(4), `Magic`(8).
+
+* **`selection`** is `Actions.CurrentSelection`, with the name resolved through
+  `WorldFilter[id]` when possible. `id` 0 with `hasSelection: false` is a **successful**
+  read meaning nothing is selected. **Negative id caveat:** Decal exposes object ids as
+  `Int32`, so genuine AC GUIDs above 2^31 appear **negative**. A validator matching ids
+  must expect negative values; do not treat a negative id as an error.
+
+#### What `combatMode` is NOT
+
+`combatMode` is the **client's** belief. The filter cannot read the server's
+`CurrentMotionState`, so:
+
+* it does **not** confirm the server agrees;
+* it does **not** tell you the animation stance, whether an attack is mid-swing, or whether
+  the character is actually swinging;
+* if a mode change was rejected or has not yet been applied server-side, this value will
+  disagree with the server.
+
+`stance` is therefore always `"unavailable: ..."` with that reason spelled out, rather than
+being omitted, so a validator sees an explicit "no such truth source here" instead of a
+missing key.
+
+#### Known caveats: staleness
+
+Two ways a snapshot can mislead. Neither is fixed here; both are avoidable.
+
+* **Vitals are client-cached and can lag the server.** The `vitals` block reflects what the
+  client was last told. For server truth use `/showstats` and read the response from
+  `chatlog_<pid>.jsonl` (`source:"network"`). Prefer vitals for fast polling and
+  `/showstats` for assertions that must be authoritative.
+
+* **Position can be stale if `dumpstate` is batched with a movement command.** If a single
+  command file contains `/teleloc ...` followed by `dumpstate`, the snapshot can be taken
+  before the client has finished moving, reporting the old position. **Send them as
+  separate writes to `incmds_<pid>.txt`**, and confirm the `seq` advanced between them,
+  rather than relying on ordering within one batch.
+
+#### Polling
+
+The snapshot is on-demand: it happens once per `dumpstate` verb call, not on a timer. The
+wielded-only scan plus the four oracle reads is cheap enough to poll at 1 to 2 second
+intervals. The expensive part of the snapshot remains `nearby`, which walks the landscape;
+that was already capped at 50 entries.
+
 ---
 
 ## 4. Chat capture (`chatlog_<pid>.jsonl`)
@@ -327,6 +452,7 @@ client-side state into a chat line you can assert on.
 | `dumpstate` snapshot | `ThwargLauncher\ThwargFilter\Observation\GameStateDumper.cs` |
 | file paths | `ThwargLauncher\ThwargFilter\FileLocations.cs` |
 | `dumpstate` verb wiring | `ThwargLauncher\ThwargFilter\FilterCommands\FilterCommandParser.cs` |
+| state-oracle section of `dumpstate` | `ThwargLauncher\ThwargFilter\Observation\StateOracle.cs` |
 | `appraise` verb | `ThwargLauncher\ThwargFilter\Observation\Appraiser.cs` |
 | `inventoryhook` auto-identify toggle | `ThwargLauncher\ThwargFilter\ThwargInventory.cs` |
 | `attack` / `attackstop` verbs | `ThwargLauncher\ThwargFilter\Observation\Attacker.cs` |

@@ -96,6 +96,8 @@ namespace ThwargFilter
             AddVitals(state, notes);
             AddPosition(state, notes);
             AddNearby(state, notes);
+            // State-oracle section. Additive: every field above keeps its existing shape.
+            StateOracle.AddState(state, notes);
 
             state["notes"] = notes;
 
