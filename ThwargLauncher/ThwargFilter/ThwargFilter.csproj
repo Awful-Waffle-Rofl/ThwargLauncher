@@ -94,6 +94,7 @@
     <Compile Include="Observation\Appraiser.cs" />
     <Compile Include="Observation\Attacker.cs" />
     <Compile Include="Observation\SpellBar.cs" />
+    <Compile Include="Observation\WieldedWeapon.cs" />
     <Compile Include="Observation\StateOracle.cs" />
     <Compile Include="Observation\TargetResolver.cs" />
     <Compile Include="Observation\ChatLogWriter.cs" />

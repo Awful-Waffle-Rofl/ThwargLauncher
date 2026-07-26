@@ -54,6 +54,8 @@ namespace ThwargFilter
 
         // The live-verified defaults. Changing these changes a proven path.
         private const string DEFAULT_AttackKey = "End";
+        // "Any" and not "Melee": the wielded weapon decides the mode.
+        private const string DEFAULT_AttackCombatMode = "Any";
         private const int DEFAULT_AttackKeyHoldMs = 200;
 
         private const string METHOD_Key = "key";
@@ -244,9 +246,19 @@ namespace ThwargFilter
             // A tap posted while the client is still in Peace does nothing, which is the
             // most likely reading of the live runs where the filter logged a mode change
             // that never landed and no attack followed.
-            CombatState mode = GetConfiguredCombatMode();
             AttackContinuation continuation = new AttackContinuation(this, target, match);
-            _combatModeSetter.EnsureCombatMode(mode, new CombatModeCallback(continuation.OnCombatModeSettled));
+            CombatModeCallback done = new CombatModeCallback(continuation.OnCombatModeSettled);
+            // Default is ANY combat mode, because the wielded weapon decides which mode the
+            // client can be in. Demanding a specific one is a request the client can only
+            // refuse when the weapon disagrees (see CombatModeSetter and ledger L6-76).
+            if (IsAnyCombatMode())
+            {
+                _combatModeSetter.EnsureCombat(done);
+            }
+            else
+            {
+                _combatModeSetter.EnsureCombatMode(GetConfiguredCombatMode(), done);
+            }
         }
 
         /// <summary>
@@ -375,9 +387,20 @@ namespace ThwargFilter
             }
         }
 
+        /// <summary>
+        /// True when the setting asks for any combat mode, which is the default and the
+        /// correct model: the weapon determines the mode, not the caller.
+        /// </summary>
+        private bool IsAnyCombatMode()
+        {
+            string text = GetSetting(SETTING_AttackCombatMode, DEFAULT_AttackCombatMode).Trim();
+            return (text.Length == 0
+                || string.Compare(text, "Any", StringComparison.OrdinalIgnoreCase) == 0);
+        }
+
         private CombatState GetConfiguredCombatMode()
         {
-            string text = GetSetting(SETTING_AttackCombatMode, "Melee").Trim();
+            string text = GetSetting(SETTING_AttackCombatMode, DEFAULT_AttackCombatMode).Trim();
             if (string.Compare(text, "Missile", StringComparison.OrdinalIgnoreCase) == 0)
             {
                 return CombatState.Missile;
@@ -479,7 +502,12 @@ namespace ThwargFilter
                 {
                     // So the harness can see the healing happen, and can tell a clean
                     // first-attempt set from one that needed the Backtick rung.
-                    entry["combatModeRequested"] = modeResult.Requested.ToString();
+                    entry["combatModeRequested"] = (modeResult.AnyCombatAccepted
+                        ? "Any"
+                        : modeResult.Requested.ToString());
+                    entry["combatModeWeapon"] = modeResult.Weapon;
+                    entry["combatModeImpossible"] = modeResult.ImpossibleRequest;
+                    entry["combatModeUsedSetCombatMode"] = modeResult.UsedSetCombatMode;
                     entry["combatModeFinal"] = modeResult.Final.ToString();
                     entry["combatModeVerified"] = modeResult.Verified;
                     entry["combatModeRetries"] = modeResult.Retries;
